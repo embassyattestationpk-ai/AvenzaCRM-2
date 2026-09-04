@@ -6,6 +6,38 @@ import { api } from '../lib/api';
 import { getCurrentUser } from '../lib/auth';
 
 const STATUS_OPTIONS = ['New', 'Documents Received', 'Processing', 'Sent to Vendor', 'Pending', 'Completed', 'Returned to Client', 'Cancelled'];
+const EMBASSY_OPTIONS = ['Qatar Embassy', 'Saudi Embassy', 'UAE Embassy', 'Kuwait Embassy', 'Bahrain Embassy', 'Oman Embassy', 'Other'];
+
+// Backward-compatible reader for a board's documents — mirrors
+// getBoardDocuments() in Code.gs. A board saved before the multi-document
+// change (point 7) has flat documentType/vendorRate/... fields directly on
+// it instead of a `documents` array; this always returns an array.
+function getBoardDocuments(board) {
+  if (!board) return [];
+  if (Array.isArray(board.documents) && board.documents.length) return board.documents;
+  return [{
+    documentType: board.documentType || '',
+    vendorRate: Number(board.vendorRate) || 0,
+    vendorAdjustment: Number(board.vendorAdjustment) || 0,
+    clientRate: Number(board.clientRate) || 0,
+    clientAdjustment: Number(board.clientAdjustment) || 0,
+  }];
+}
+
+function emptyDocument() {
+  return { documentType: '', documentTypeOther: '', vendorRate: 0, vendorAdjustment: 0, clientRate: 0, clientAdjustment: 0 };
+}
+
+function emptyBoardRow() {
+  return { board: '', vendor: '', documents: [emptyDocument()] };
+}
+
+// Resolves a document-type dropdown value + its "Other" free text into the
+// value actually saved (point 6): "Other" is never stored literally.
+function resolveDocType(doc) {
+  if (doc.documentType === 'Other') return (doc.documentTypeOther || '').trim() || 'Other';
+  return doc.documentType || '';
+}
 
 export default function CaseForm({ initial, onSaved, onCancel }) {
   const isEdit = !!initial?.Case_ID;
@@ -34,6 +66,9 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     Notes: '',
     Case_Mode: 'single',
     Document_Type: '',
+    Document_Type_Other: '',
+    Embassy: '',
+    Embassy_Other: '',
     Advance_Payment: 0,
     Advance_Payment_Method: 'Cash',
     ...initial,
@@ -42,9 +77,11 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   const [baseRate, setBaseRate] = useState(0);
   const [paymentMethods, setPaymentMethods] = useState(['Cash']);
 
-  // --- "Multiple" (board) mode state — point 7/9 ---
-  const [selectedBoards, setSelectedBoards] = useState([]); // list of board names checked
-  const [boardData, setBoardData] = useState({}); // board name -> { documentType, vendor, vendorRate, vendorAdjustment, clientRate, clientAdjustment }
+  // --- "Multiple" (board) mode state — point 7/8/9 ---
+  // Board name is now free text (point 8) — boardTypes is only used as
+  // datalist autocomplete suggestions, not a fixed dropdown. Each board can
+  // hold multiple documents (point 7), each with its own rates.
+  const [boardRows, setBoardRows] = useState([]);
   const isEditingBoardsCase = isEdit && initial?.Case_Mode === 'multiple' && initial?.Boards_JSON;
   let existingBoards = [];
   try { existingBoards = isEditingBoardsCase ? JSON.parse(initial.Boards_JSON) : []; } catch { existingBoards = []; }
@@ -64,6 +101,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
 
   const isMultiple = form.Case_Mode === 'multiple';
   const isConsultant = form.Client_Type === 'Consultant';
+  const isEmbassyService = form.Service === 'Embassy Attestation';
   const consultants = useMemo(() => clients.filter((c) => c.Client_Type === 'Consultant'), [clients]);
 
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
@@ -106,48 +144,69 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     }
   }, [baseRate, form.Special_Rate_Adjustment, isConsultant, isMultiple, isEdit]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Total (Gross) amount the client is being billed — shown next to the
+  // Advance Payment box (point 9) so staff can see the total while deciding
+  // the advance amount, not just the Profit figure.
+  const grossTotal = useMemo(() => {
+    if (isMultiple) {
+      return boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0);
+    }
+    return Number(form.Client_Payment) || 0;
+  }, [isMultiple, boardRows, form.Client_Payment]);
+
   const profit = useMemo(() => {
     if (isMultiple) {
-      const vp = selectedBoards.reduce((s, b) => s + Number(boardData[b]?.vendorRate || 0) + Number(boardData[b]?.vendorAdjustment || 0), 0);
-      const cp = selectedBoards.reduce((s, b) => s + Number(boardData[b]?.clientRate || 0) + Number(boardData[b]?.clientAdjustment || 0), 0);
-      return cp - vp;
+      const vp = boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0);
+      return grossTotal - vp;
     }
     return (Number(form.Client_Payment) || 0) - (Number(form.Vendor_Payment) || 0);
-  }, [isMultiple, selectedBoards, boardData, form.Client_Payment, form.Vendor_Payment]);
+  }, [isMultiple, boardRows, grossTotal, form.Client_Payment, form.Vendor_Payment]);
 
-  function toggleBoard(name) {
-    setSelectedBoards((prev) => {
-      if (prev.includes(name)) return prev.filter((b) => b !== name);
-      // seed default per-board state
-      setBoardData((d) => ({ ...d, [name]: d[name] || { documentType: '', vendor: '', vendorRate: 0, vendorAdjustment: 0, clientRate: 0, clientAdjustment: 0 } }));
-      return [...prev, name];
-    });
+  function addBoardRow() {
+    setBoardRows((rows) => [...rows, emptyBoardRow()]);
+  }
+  function removeBoardRow(idx) {
+    setBoardRows((rows) => rows.filter((_, i) => i !== idx));
+  }
+  function setBoardRow(idx, patch) {
+    setBoardRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  }
+  function addDocument(boardIdx) {
+    setBoardRows((rows) => rows.map((r, i) => (i === boardIdx ? { ...r, documents: [...r.documents, emptyDocument()] } : r)));
+  }
+  function removeDocument(boardIdx, docIdx) {
+    setBoardRows((rows) => rows.map((r, i) => (i === boardIdx ? { ...r, documents: r.documents.filter((_, di) => di !== docIdx) } : r)));
+  }
+  function setDocument(boardIdx, docIdx, patch) {
+    setBoardRows((rows) => rows.map((r, i) => (
+      i === boardIdx ? { ...r, documents: r.documents.map((d, di) => (di === docIdx ? { ...d, ...patch } : d)) } : r
+    )));
   }
 
-  function setBoard(name, k, v) {
-    setBoardData((d) => ({ ...d, [name]: { ...d[name], [k]: v } }));
-  }
-
-  // Auto-fetch rates per board as vendor / consultant is picked.
-  function onBoardVendorChange(board, vendorName) {
-    setBoard(board, 'vendor', vendorName);
+  // Auto-fetch rates when a board's vendor is picked — applies to the
+  // board's first document, same idea as before (point 5/6 rate lookups).
+  function onBoardVendorChange(boardIdx, vendorName) {
+    setBoardRow(boardIdx, { vendor: vendorName });
     if (!vendorName) return;
-    api.getServiceRates({ service: board, vendor: vendorName }).then((rates) => {
+    const boardName = boardRows[boardIdx]?.board;
+    if (!boardName) return;
+    api.getServiceRates({ service: boardName, vendor: vendorName }).then((rates) => {
       const r = rates && rates[0];
-      setBoard(board, 'vendorRate', r ? Number(r.Rate) : 0);
+      if (r) setDocument(boardIdx, 0, { vendorRate: Number(r.Rate) });
     }).catch(() => {});
   }
 
   useEffect(() => {
     if (!isConsultant || !isMultiple || !form.Client_Name) return;
-    selectedBoards.forEach((board) => {
-      api.getConsultantRates({ consultant: form.Client_Name, board }).then((rates) => {
+    boardRows.forEach((row, idx) => {
+      if (!row.board) return;
+      api.getConsultantRates({ consultant: form.Client_Name, board: row.board }).then((rates) => {
         const r = rates && rates[0];
-        if (r) setBoard(board, 'clientRate', Number(r.Rate));
+        if (r) setDocument(idx, 0, { clientRate: Number(r.Rate) });
       }).catch(() => {});
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConsultant, isMultiple, form.Client_Name, selectedBoards.join(',')]);
+  }, [isConsultant, isMultiple, form.Client_Name, boardRows.map((r) => r.board).join(',')]);
 
   async function addInline(kind) {
     if (!inlineName.trim()) return;
@@ -174,14 +233,27 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     } catch (e) { toast.error(e.message); }
   }
 
+  // Resolves the final Document_Type saved on the case: "Other" free text
+  // (point 6) plus, when the Service is "Embassy Attestation", the chosen
+  // embassy appended (point 5) — e.g. "PCC - Qatar Embassy".
+  function resolveCaseDocumentType() {
+    let base = form.Document_Type === 'Other' ? ((form.Document_Type_Other || '').trim() || 'Other') : (form.Document_Type || '');
+    if (isEmbassyService && form.Embassy) {
+      const embassyName = form.Embassy === 'Other' ? ((form.Embassy_Other || '').trim() || 'Other') : form.Embassy;
+      base = base ? `${base} - ${embassyName}` : `Embassy Attestation - ${embassyName}`;
+    }
+    return base;
+  }
+
   async function submit(e) {
     e.preventDefault();
     if (!form.Client_Name) return toast.error('Client name is required');
-    if (isMultiple && !selectedBoards.length) return toast.error('Select at least one board');
+    if (isMultiple && !boardRows.length) return toast.error('Add at least one board');
+    if (isMultiple && boardRows.some((r) => !r.board.trim())) return toast.error('Every board needs a name');
     setSaving(true);
     try {
       const user = getCurrentUser();
-      const payload = { ...form, Added_By: initial?.Added_By || user?.fullName || '' };
+      const payload = { ...form, Added_By: initial?.Added_By || user?.fullName || '', Document_Type: resolveCaseDocumentType() };
 
       // Keep the client's own ID Card Number / Company in sync with what was
       // (re)typed on the case form, for an already-existing client.
@@ -194,21 +266,26 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         await api.updateCase({ ...payload, Case_ID: initial.Case_ID });
         toast.success('Case updated');
       } else if (isMultiple) {
-        const Boards = selectedBoards.map((b) => ({
-          Board_Name: b,
-          Document_Type: boardData[b]?.documentType || '',
-          Vendor: boardData[b]?.vendor || '',
-          Vendor_Rate: boardData[b]?.vendorRate || 0,
-          Vendor_Adjustment: boardData[b]?.vendorAdjustment || 0,
-          Client_Rate: boardData[b]?.clientRate || 0,
-          Client_Adjustment: boardData[b]?.clientAdjustment || 0,
+        const Boards = boardRows.map((row) => ({
+          Board_Name: row.board.trim(),
+          Vendor: row.vendor || '',
+          Documents: row.documents.map((d) => ({
+            Document_Type: resolveDocType(d),
+            Vendor_Rate: Number(d.vendorRate) || 0,
+            Vendor_Adjustment: Number(d.vendorAdjustment) || 0,
+            Client_Rate: Number(d.clientRate) || 0,
+            Client_Adjustment: Number(d.clientAdjustment) || 0,
+          })),
         }));
-        const boardsClientTotal = Boards.reduce((s, b) => s + Number(b.Client_Rate) + Number(b.Client_Adjustment), 0);
-        await api.addCase({ ...payload, Case_Mode: 'multiple', Boards, Client_Payment: boardsClientTotal });
-        // Remember any edited rates for next time (points 5 & 6).
+        await api.addCase({ ...payload, Case_Mode: 'multiple', Boards, Client_Payment: grossTotal });
+        // Remember any edited rates for next time (points 5 & 6) — based on
+        // each board's first document, same simplification as the rate
+        // auto-suggest above.
         Boards.forEach((b) => {
-          if (isConsultant && b.Vendor) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: b.Board_Name, Rate: b.Client_Rate }).catch(() => {});
-          if (b.Vendor) api.upsertServiceRate({ Vendor_Name: b.Vendor, Service_Name: b.Board_Name, Rate: b.Vendor_Rate }).catch(() => {});
+          const firstDoc = b.Documents[0];
+          if (!firstDoc) return;
+          if (isConsultant && b.Vendor) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: b.Board_Name, Rate: firstDoc.Client_Rate }).catch(() => {});
+          if (b.Vendor) api.upsertServiceRate({ Vendor_Name: b.Vendor, Service_Name: b.Board_Name, Rate: firstDoc.Vendor_Rate }).catch(() => {});
         });
         toast.success(`Case added — ${Boards.length} board(s)`);
       } else {
@@ -317,6 +394,19 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
               {newServiceOpen && (
                 <InlineAdd placeholder="New service name" onCancel={() => setNewServiceOpen(false)} onAdd={(v) => { setInlineName(v); addInline('service'); }} />
               )}
+              {/* Point 5: Embassy sub-select when Service = Embassy Attestation */}
+              {isEmbassyService && (
+                <div className="mt-2 space-y-2">
+                  <label className="label">Which Embassy?</label>
+                  <select className="input" value={form.Embassy} onChange={(e) => set('Embassy', e.target.value)}>
+                    <option value="">Select embassy</option>
+                    {EMBASSY_OPTIONS.map((em) => <option key={em} value={em}>{em}</option>)}
+                  </select>
+                  {form.Embassy === 'Other' && (
+                    <input className="input" placeholder="Type embassy name" value={form.Embassy_Other} onChange={(e) => set('Embassy_Other', e.target.value)} />
+                  )}
+                </div>
+              )}
             </div>
             <div>
               <label className="label">Document Type</label>
@@ -324,6 +414,10 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
                 <option value="">Select document type</option>
                 {docTypes.map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
               </select>
+              {/* Point 6: "Other" free text */}
+              {form.Document_Type === 'Other' && (
+                <input className="input mt-2" placeholder="Type the document name" value={form.Document_Type_Other} onChange={(e) => set('Document_Type_Other', e.target.value)} />
+              )}
             </div>
           </div>
 
@@ -378,65 +472,104 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
           <div className="text-xs font-semibold text-slate-500 uppercase">Boards on this case (use "Change Status" to edit)</div>
           {existingBoards.map((b, i) => (
-            <div key={i} className="flex items-center justify-between text-sm px-2 py-1.5 rounded bg-white border border-slate-100">
-              <span className="font-medium">{b.board}</span>
-              <span className="text-slate-500 text-xs">{b.documentType || '—'}</span>
-              <span className="text-slate-500">{b.vendor || '—'}</span>
-              <span className="text-xs text-slate-500">{b.status}</span>
+            <div key={i} className="rounded bg-white border border-slate-100 px-2 py-1.5 text-sm space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">{b.board}</span>
+                <span className="text-slate-500">{b.vendor || '—'}</span>
+                <span className="text-xs text-slate-500">{b.status}</span>
+              </div>
+              {getBoardDocuments(b).map((d, di) => (
+                <div key={di} className="text-xs text-slate-500 pl-2">
+                  {d.documentType || '—'} — Vendor {Number(d.vendorRate) + Number(d.vendorAdjustment)} / Client {Number(d.clientRate) + Number(d.clientAdjustment)}
+                </div>
+              ))}
             </div>
           ))}
         </div>
       )}
 
-      {/* --- MULTIPLE mode: point 9, independent per-board vendor/rate --- */}
+      {/* --- MULTIPLE mode: point 7/8/9, free-text board name + repeatable
+          per-board documents, each with its own rates --- */}
       {isMultiple && !isEdit && (
         <div className="space-y-3">
-          <label className="label">Boards / Documents to process</label>
-          <div className="grid grid-cols-3 gap-2">
-            {boardTypes.map((b) => (
-              <label key={b} className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg border cursor-pointer ${selectedBoards.includes(b) ? 'bg-brand-50 border-brand-300' : 'border-slate-200'}`}>
-                <input type="checkbox" checked={selectedBoards.includes(b)} onChange={() => toggleBoard(b)} />
-                {b}
-              </label>
-            ))}
+          <div className="flex items-center justify-between">
+            <label className="label mb-0">Boards / Documents to process</label>
+            <button type="button" className="text-brand-600 text-xs font-medium" onClick={addBoardRow}>+ Add board</button>
           </div>
+          <datalist id="board-types-list">{boardTypes.map((b) => <option key={b} value={b} />)}</datalist>
 
-          {selectedBoards.map((b) => (
-            <div key={b} className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
-              <div className="text-sm font-semibold text-slate-700">{b}</div>
-              <div className="grid grid-cols-2 gap-3">
+          {!boardRows.length && <p className="text-xs text-slate-400">No boards added yet — click "+ Add board" to start (e.g. IBCC, MOFA, Qatar Embassy…).</p>}
+
+          {boardRows.map((row, bi) => (
+            <div key={bi} className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
+              <div className="grid grid-cols-2 gap-3 items-end">
                 <div>
-                  <label className="label">Document Type</label>
-                  <select className="input" value={boardData[b]?.documentType || ''} onChange={(e) => setBoard(b, 'documentType', e.target.value)}>
-                    <option value="">Select document type</option>
-                    {docTypes.map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
-                  </select>
+                  <label className="label">Board Name</label>
+                  <input
+                    className="input"
+                    list="board-types-list"
+                    placeholder="Type a board name (e.g. IBCC, Qatar Embassy)"
+                    value={row.board}
+                    onChange={(e) => setBoardRow(bi, { board: e.target.value })}
+                  />
                 </div>
-                <div>
-                  <label className="label">Vendor for {b}</label>
-                  <select className="input" value={boardData[b]?.vendor || ''} onChange={(e) => onBoardVendorChange(b, e.target.value)}>
-                    <option value="">Select vendor</option>
-                    {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
-                  </select>
+                <div className="flex items-end gap-2">
+                  <div className="flex-1">
+                    <label className="label">Vendor for this board</label>
+                    <select className="input" value={row.vendor} onChange={(e) => onBoardVendorChange(bi, e.target.value)}>
+                      <option value="">Select vendor</option>
+                      {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
+                    </select>
+                  </div>
+                  <button type="button" className="btn-danger" onClick={() => removeBoardRow(bi)}>Remove Board</button>
                 </div>
               </div>
-              <div className="grid grid-cols-4 gap-3">
-                <div>
-                  <label className="label">Vendor Rate</label>
-                  <input type="number" className="input" value={boardData[b]?.vendorRate || 0} onChange={(e) => setBoard(b, 'vendorRate', e.target.value)} />
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold text-slate-500 uppercase">Documents in this board</div>
+                  <button type="button" className="text-brand-600 text-xs font-medium" onClick={() => addDocument(bi)}>+ Add document</button>
                 </div>
-                <div>
-                  <label className="label">Vendor Adj (+/-)</label>
-                  <input type="number" className="input" value={boardData[b]?.vendorAdjustment || 0} onChange={(e) => setBoard(b, 'vendorAdjustment', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Client Rate {isConsultant ? <span className="text-xs text-slate-400">(auto)</span> : ''}</label>
-                  <input type="number" className="input" value={boardData[b]?.clientRate || 0} onChange={(e) => setBoard(b, 'clientRate', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Client Adj (+/-)</label>
-                  <input type="number" className="input" value={boardData[b]?.clientAdjustment || 0} onChange={(e) => setBoard(b, 'clientAdjustment', e.target.value)} />
-                </div>
+                {row.documents.map((doc, di) => (
+                  <div key={di} className="rounded bg-white border border-slate-100 p-2 space-y-2">
+                    <div className="grid grid-cols-2 gap-3 items-end">
+                      <div>
+                        <label className="label">Document Type</label>
+                        <select className="input" value={doc.documentType} onChange={(e) => setDocument(bi, di, { documentType: e.target.value })}>
+                          <option value="">Select document type</option>
+                          {docTypes.map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
+                        </select>
+                        {/* Point 6: "Other" free text, per document */}
+                        {doc.documentType === 'Other' && (
+                          <input className="input mt-2" placeholder="Type the document name" value={doc.documentTypeOther} onChange={(e) => setDocument(bi, di, { documentTypeOther: e.target.value })} />
+                        )}
+                      </div>
+                      {row.documents.length > 1 && (
+                        <div className="text-right">
+                          <button type="button" className="btn-ghost text-xs" onClick={() => removeDocument(bi, di)}>Remove document</button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-4 gap-3">
+                      <div>
+                        <label className="label">Vendor Rate</label>
+                        <input type="number" className="input" value={doc.vendorRate} onChange={(e) => setDocument(bi, di, { vendorRate: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="label">Vendor Adj (+/-)</label>
+                        <input type="number" className="input" value={doc.vendorAdjustment} onChange={(e) => setDocument(bi, di, { vendorAdjustment: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="label">Client Rate {isConsultant ? <span className="text-xs text-slate-400">(auto)</span> : ''}</label>
+                        <input type="number" className="input" value={doc.clientRate} onChange={(e) => setDocument(bi, di, { clientRate: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="label">Client Adj (+/-)</label>
+                        <input type="number" className="input" value={doc.clientAdjustment} onChange={(e) => setDocument(bi, di, { clientAdjustment: e.target.value })} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ))}
@@ -451,8 +584,11 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
 
       {!isEdit && (
         <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 space-y-2">
-          <div className="text-sm font-semibold text-blue-800">Advance Payment (optional)</div>
-          <p className="text-xs text-blue-700">Client se kuch le liya hai? Yahan darj karo — nahi to case Unpaid ban jayega.</p>
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-blue-800">Advance Payment (optional)</div>
+            <div className="text-sm text-blue-800">Total (Gross): <span className="font-bold">{grossTotal.toLocaleString()}</span></div>
+          </div>
+          <p className="text-xs text-blue-700">Has the client paid anything yet? Enter it here — otherwise the case will be marked Unpaid.</p>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="label">Advance Amount Received</label>
