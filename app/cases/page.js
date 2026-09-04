@@ -218,20 +218,71 @@ export default function CasesPage() {
 // (boards) case, each board (IBCC, MOFA, HEC…) gets its own status + a
 // same-vendor/change-vendor reconfirmation (point 9). For a plain single
 // case, it's just a straight status dropdown.
+const FINAL_STATUSES = ['Completed', 'Returned to Client'];
+const BOARD_DELIVERED_STATUSES = ['Delivered with Payment', 'Delivered without Payment'];
+
 function ChangeStatusModal({ caseObj, onClose, onDone }) {
   const isMultiple = caseObj.Case_Mode === 'multiple' && caseObj.Boards_JSON;
   const [status, setStatus] = useState(caseObj.Document_Status);
   const [saving, setSaving] = useState(false);
+  const [balance, setBalance] = useState(null); // { billed, paid, writtenOff, balance }
+  const [settleMode, setSettleMode] = useState(null); // null | 'ask' | 'pay' | 'writeoff'
+  const [settleAmount, setSettleAmount] = useState(0);
+  const [settleMethod, setSettleMethod] = useState('Cash');
+  const [paymentMethods, setPaymentMethods] = useState(['Cash']);
+  const [pendingAction, setPendingAction] = useState(null); // function to run once settled
 
   let boards = [];
   try { boards = isMultiple ? JSON.parse(caseObj.Boards_JSON) : []; } catch { boards = []; }
   const [boardEdits, setBoardEdits] = useState(() => boards.map((b) => ({ status: b.status, vendor: b.vendor, changeVendor: false, newVendor: '', vendorRate: b.vendorRate, payAmount: 0 })));
   const [vendors, setVendors] = useState([]);
 
-  useEffect(() => { if (isMultiple) api.getVendors().then(setVendors).catch(() => {}); }, [isMultiple]);
+  useEffect(() => {
+    if (isMultiple) api.getVendors().then(setVendors).catch(() => {});
+    api.getCaseBalance(caseObj.Case_ID).then(setBalance).catch(() => {});
+    api.getBoardTypes().then((o) => { if (o.paymentMethods?.length) setPaymentMethods(o.paymentMethods); }).catch(() => {});
+  }, [isMultiple, caseObj.Case_ID]);
 
   function editBoard(i, patch) {
     setBoardEdits((arr) => arr.map((b, idx) => (idx === i ? { ...b, ...patch } : b)));
+  }
+
+  // Point 9/10: don't silently mark something "delivered" while money is
+  // still owed — ask whether to collect it now or book it as a loss.
+  function needsSettling() {
+    if (!balance || balance.balance <= 0) return false;
+    if (!isMultiple) return FINAL_STATUSES.includes(status);
+    return boardEdits.some((be) => BOARD_DELIVERED_STATUSES.includes(be.status));
+  }
+
+  function proceed(action) {
+    if (needsSettling() && settleMode !== 'done') {
+      setSettleAmount(balance.balance);
+      setSettleMode('ask');
+      setPendingAction(() => action);
+      return;
+    }
+    action();
+  }
+
+  async function settlePay() {
+    setSaving(true);
+    try {
+      await api.addPayment({ Payment_Type: 'Client', Client_or_Vendor: caseObj.Client_Name, Case_ID: caseObj.Case_ID, Total_Amount: balance.billed, Paid_Amount: settleAmount, Payment_Method: settleMethod, Notes: 'Payment at delivery' });
+      toast.success('Payment recorded');
+      setSettleMode('done');
+      pendingAction && pendingAction();
+    } catch (e) { toast.error(e.message); } finally { setSaving(false); }
+  }
+
+  async function settleWriteOff() {
+    setSaving(true);
+    try {
+      await api.writeOffCase({ Case_ID: caseObj.Case_ID, Amount: settleAmount });
+      toast.success('Booked as loss');
+      setSettleMode('done');
+      pendingAction && pendingAction();
+    } catch (e) { toast.error(e.message); } finally { setSaving(false); }
   }
 
   async function saveSingle() {
@@ -263,6 +314,30 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
     } catch (e) { toast.error(e.message); } finally { setSaving(false); }
   }
 
+  const settlePanel = settleMode === 'ask' && (
+    <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-3">
+      <div className="text-sm font-semibold text-amber-800">Client ka balance abhi bhi PKR {balance.balance.toLocaleString()} baqi hai</div>
+      <p className="text-xs text-amber-700">Delivered mark karne se pehle: abhi payment le lo, ya isay loss mein book kar do.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="label">Amount</label>
+          <input type="number" className="input" value={settleAmount} onChange={(e) => setSettleAmount(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Payment Method</label>
+          <select className="input" value={settleMethod} onChange={(e) => setSettleMethod(e.target.value)}>
+            {paymentMethods.map((m) => <option key={m}>{m}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button type="button" disabled={saving} className="btn-primary" onClick={settlePay}>Payment Le Li — Record Karo</button>
+        <button type="button" disabled={saving} className="btn-danger" onClick={settleWriteOff}>Loss Mein Book Karo</button>
+        <button type="button" disabled={saving} className="btn-ghost" onClick={() => { setSettleMode('done'); pendingAction && pendingAction(); }}>Skip (baad mein karunga)</button>
+      </div>
+    </div>
+  );
+
   if (!isMultiple) {
     return (
       <Modal title={`Change Status — ${caseObj.Case_ID}`} onClose={onClose} width="max-w-md">
@@ -273,9 +348,10 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
               {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
             </select>
           </div>
+          {settlePanel}
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-            <button disabled={saving} className="btn-primary" onClick={saveSingle}>{saving ? 'Saving…' : 'Save'}</button>
+            <button disabled={saving} className="btn-primary" onClick={() => proceed(saveSingle)}>{saving ? 'Saving…' : 'Save'}</button>
           </div>
         </div>
       </Modal>
@@ -329,9 +405,10 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
             </div>
           );
         })}
+        {settlePanel}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button disabled={saving} className="btn-primary" onClick={saveBoards}>{saving ? 'Saving…' : 'Save All'}</button>
+          <button disabled={saving} className="btn-primary" onClick={() => proceed(saveBoards)}>{saving ? 'Saving…' : 'Save All'}</button>
         </div>
       </div>
     </Modal>

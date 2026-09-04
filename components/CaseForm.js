@@ -33,14 +33,21 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     Actual_Return_Date: '',
     Notes: '',
     Case_Mode: 'single',
+    Document_Type: '',
+    Advance_Payment: 0,
+    Advance_Payment_Method: 'Cash',
     ...initial,
   }));
 
   const [baseRate, setBaseRate] = useState(0);
+  const [paymentMethods, setPaymentMethods] = useState(['Cash']);
 
   // --- "Multiple" (board) mode state — point 7/9 ---
   const [selectedBoards, setSelectedBoards] = useState([]); // list of board names checked
   const [boardData, setBoardData] = useState({}); // board name -> { documentType, vendor, vendorRate, vendorAdjustment, clientRate, clientAdjustment }
+  const isEditingBoardsCase = isEdit && initial?.Case_Mode === 'multiple' && initial?.Boards_JSON;
+  let existingBoards = [];
+  try { existingBoards = isEditingBoardsCase ? JSON.parse(initial.Boards_JSON) : []; } catch { existingBoards = []; }
 
   const [newClientOpen, setNewClientOpen] = useState(false);
   const [newVendorOpen, setNewVendorOpen] = useState(false);
@@ -51,6 +58,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     Promise.all([api.getClients(), api.getVendors(), api.getServices(), api.getDocumentTypes(), api.getBoardTypes()])
       .then(([c, v, s, dt, bt]) => {
         setClients(c); setVendors(v); setServices(s); setDocTypes(dt); setBoardTypes(bt.boards || []);
+        if (bt.paymentMethods?.length) setPaymentMethods(bt.paymentMethods);
       }).catch((e) => toast.error(e.message));
   }, []);
 
@@ -309,6 +317,16 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
                 <InlineAdd placeholder="New service name" onCancel={() => setNewServiceOpen(false)} onAdd={(v) => { setInlineName(v); addInline('service'); }} />
               )}
             </div>
+            <div>
+              <label className="label">Document Type</label>
+              <select className="input" value={form.Document_Type} onChange={(e) => set('Document_Type', e.target.value)}>
+                <option value="">Select document type</option>
+                {docTypes.map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
             {!isConsultant && (
               <div>
                 <label className="label flex items-center justify-between">Vendor
@@ -349,6 +367,24 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
             </div>
           )}
         </>
+      )}
+
+      {/* Editing a multiple-board case: boards themselves are managed from
+          "Change Status" on the Cases list (vendor/status/payments) — here
+          we just show a clear read-only summary so Edit isn't a blank/odd
+          screen, and this form only touches the shared fields below. */}
+      {isEditingBoardsCase && (
+        <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
+          <div className="text-xs font-semibold text-slate-500 uppercase">Boards on this case (use "Change Status" to edit)</div>
+          {existingBoards.map((b, i) => (
+            <div key={i} className="flex items-center justify-between text-sm px-2 py-1.5 rounded bg-white border border-slate-100">
+              <span className="font-medium">{b.board}</span>
+              <span className="text-slate-500 text-xs">{b.documentType || '—'}</span>
+              <span className="text-slate-500">{b.vendor || '—'}</span>
+              <span className="text-xs text-slate-500">{b.status}</span>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* --- MULTIPLE mode: point 9, independent per-board vendor/rate --- */}
@@ -411,6 +447,25 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         <span className="text-sm font-medium text-emerald-800">Auto-calculated Profit</span>
         <span className="text-lg font-bold text-emerald-700">{profit.toLocaleString()}</span>
       </div>
+
+      {!isEdit && (
+        <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 space-y-2">
+          <div className="text-sm font-semibold text-blue-800">Advance Payment (optional)</div>
+          <p className="text-xs text-blue-700">Client se kuch le liya hai? Yahan darj karo — nahi to case Unpaid ban jayega.</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">Advance Amount Received</label>
+              <input type="number" min="0" className="input" value={form.Advance_Payment} onChange={(e) => set('Advance_Payment', e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Payment Method</label>
+              <select className="input" value={form.Advance_Payment_Method} onChange={(e) => set('Advance_Payment_Method', e.target.value)}>
+                {paymentMethods.map((m) => <option key={m}>{m}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-4">
         <div>

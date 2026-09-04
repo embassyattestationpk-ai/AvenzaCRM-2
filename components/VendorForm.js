@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import { api } from '../lib/api';
 
 export default function VendorForm({ initial, onSaved, onCancel }) {
-  const [form, setForm] = useState({ Vendor_Name: '', Phone: '', Email: '', Service_Type: '', Status: 'Active', Notes: '', ...initial });
+  const [form, setForm] = useState({ Vendor_Name: '', Phone: '', Email: '', Address: '', Service_Type: '', Status: 'Active', Notes: '', ...initial });
   const [saving, setSaving] = useState(false);
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
 
@@ -35,6 +35,10 @@ export default function VendorForm({ initial, onSaved, onCancel }) {
           <label className="label">Email</label>
           <input className="input" value={form.Email} onChange={(e) => set('Email', e.target.value)} />
         </div>
+      </div>
+      <div>
+        <label className="label">Address</label>
+        <input className="input" value={form.Address} onChange={(e) => set('Address', e.target.value)} />
       </div>
       <div>
         <label className="label">Service Type</label>

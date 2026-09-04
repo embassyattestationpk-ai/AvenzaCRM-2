@@ -12,8 +12,13 @@ export default function VendorProfilePage() {
   const { id } = useParams();
   const router = useRouter();
   const [profile, setProfile] = useState(null);
+  const [rates, setRates] = useState([]);
 
   useEffect(() => { api.getVendor(id).then(setProfile).catch((e) => toast.error(e.message)); }, [id]);
+  useEffect(() => {
+    if (!profile) return;
+    api.getServiceRates({ vendor: profile.vendor.Vendor_Name }).then(setRates).catch(() => {});
+  }, [profile]);
   if (!profile) return <div className="text-slate-400">Loading…</div>;
   const { vendor, cases, totalPayable, totalPaid, pending } = profile;
 
@@ -26,6 +31,7 @@ export default function VendorProfilePage() {
         <div className="mt-3 grid grid-cols-2 gap-x-8 gap-y-1 text-sm text-slate-600">
           <div><span className="text-slate-400">Phone:</span> {vendor.Phone || '-'}</div>
           <div><span className="text-slate-400">Email:</span> {vendor.Email || '-'}</div>
+          <div><span className="text-slate-400">Address:</span> {vendor.Address || '-'}</div>
           <div><span className="text-slate-400">Status:</span> {vendor.Status}</div>
         </div>
       </div>
@@ -34,6 +40,27 @@ export default function VendorProfilePage() {
         <StatCard label="Total Payable" value={money(totalPayable)} icon="💵" tone="brand" />
         <StatCard label="Total Paid" value={money(totalPaid)} icon="✅" tone="green" />
         <StatCard label="Pending Payment" value={money(pending)} icon="🕐" tone="red" />
+      </div>
+
+      <div className="card">
+        <h3 className="font-semibold text-slate-700 mb-4">Rates by Service / Board (with Turnaround Time)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead><tr className="border-b border-slate-100">
+              {['Service / Board', 'Rate', 'TAT (days)'].map((h) => <th key={h} className="th">{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {rates.map((r) => (
+                <tr key={r.Rate_ID} className="border-b border-slate-50">
+                  <td className="td font-medium">{r.Service_Name}</td>
+                  <td className="td">{money(r.Rate)}</td>
+                  <td className="td">{r.Turnaround_Days || '-'}</td>
+                </tr>
+              ))}
+              {!rates.length && <tr><td colSpan={3} className="td text-center text-slate-400 py-6">No rates set yet — add them from Settings → Service Rates</td></tr>}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">

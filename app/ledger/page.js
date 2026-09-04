@@ -10,6 +10,7 @@ const TABS = [
   { key: 'clients', label: 'Clients (Walk-in)' },
   { key: 'consultants', label: 'Consultants' },
   { key: 'vendors', label: 'Vendors' },
+  { key: 'caseDues', label: 'By Case (Pending Only)' },
 ];
 
 export default function LedgerPage() {
@@ -51,14 +52,14 @@ export default function LedgerPage() {
       <div className="card overflow-x-auto">
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
-            {tab === 'vendors'
-              ? ['Vendor', 'Cases', 'Total Payable', 'Total Paid', 'Balance (We Owe)'].map((h) => <th key={h} className="th">{h}</th>)
-              : ['Name', 'Cases', 'Total Billed', 'Total Paid', 'Balance (Owed to Us)'].map((h) => <th key={h} className="th">{h}</th>)}
+            {tab === 'vendors' && ['Vendor', 'Cases', 'Total Payable', 'Total Paid', 'Balance (We Owe)'].map((h) => <th key={h} className="th">{h}</th>)}
+            {(tab === 'clients' || tab === 'consultants') && ['Name', 'Cases', 'Total Billed', 'Total Paid', 'Balance (Owed to Us)'].map((h) => <th key={h} className="th">{h}</th>)}
+            {tab === 'caseDues' && ['Case ID', 'Client', 'Vendor', 'Status', 'Client Balance (Owed to Us)', 'Vendor Balance (We Owe)'].map((h) => <th key={h} className="th">{h}</th>)}
           </tr></thead>
           <tbody>
-            {loading && <tr><td colSpan={5} className="td text-center text-slate-400 py-8">Loading…</td></tr>}
-            {!loading && !rows.length && <tr><td colSpan={5} className="td text-center text-slate-400 py-8">No records</td></tr>}
-            {tab === 'vendors' ? rows.map((r) => (
+            {loading && <tr><td colSpan={6} className="td text-center text-slate-400 py-8">Loading…</td></tr>}
+            {!loading && !rows.length && <tr><td colSpan={6} className="td text-center text-slate-400 py-8">{tab === 'caseDues' ? 'No pending balances — everything settled' : 'No records'}</td></tr>}
+            {tab === 'vendors' && rows.map((r) => (
               <tr key={r.name} className="border-b border-slate-50">
                 <td className="td font-medium">{r.name}</td>
                 <td className="td">{r.caseCount}</td>
@@ -66,13 +67,24 @@ export default function LedgerPage() {
                 <td className="td">{money(r.totalPaid)}</td>
                 <td className={`td font-semibold ${r.balance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{money(r.balance)}</td>
               </tr>
-            )) : rows.map((r) => (
+            ))}
+            {(tab === 'clients' || tab === 'consultants') && rows.map((r) => (
               <tr key={r.name} className="border-b border-slate-50">
                 <td className="td font-medium">{r.name}</td>
                 <td className="td">{r.caseCount}</td>
                 <td className="td">{money(r.totalBilled)}</td>
                 <td className="td">{money(r.totalPaid)}</td>
                 <td className={`td font-semibold ${r.balance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{money(r.balance)}</td>
+              </tr>
+            ))}
+            {tab === 'caseDues' && rows.map((r) => (
+              <tr key={r.Case_ID} className="border-b border-slate-50">
+                <td className="td font-mono text-xs">{r.Case_ID}</td>
+                <td className="td font-medium">{r.Client_Name}</td>
+                <td className="td">{r.Vendor}</td>
+                <td className="td">{r.Document_Status}</td>
+                <td className={`td font-semibold ${r.clientBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{money(r.clientBalance)}</td>
+                <td className={`td font-semibold ${r.vendorBalance > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>{money(r.vendorBalance)}</td>
               </tr>
             ))}
           </tbody>
