@@ -13,6 +13,23 @@ const STATUS_OPTIONS = ['New', 'Documents Received', 'Processing', 'Sent to Vend
 const BOARD_STATUS_OPTIONS = ['Document Received', 'Sent to Vendor', 'Hold', 'Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
 const PAGE_SIZE = 15;
 
+// Backward-compatible reader for a board's documents — mirrors
+// getBoardDocuments() in Code.gs (point 7). A board saved before the
+// multi-document change has flat documentType/vendorRate/... fields
+// directly on it instead of a `documents` array; this always returns an
+// array so every UI spot can treat both shapes the same way.
+function getBoardDocuments(board) {
+  if (!board) return [];
+  if (Array.isArray(board.documents) && board.documents.length) return board.documents;
+  return [{
+    documentType: board.documentType || '',
+    vendorRate: Number(board.vendorRate) || 0,
+    vendorAdjustment: Number(board.vendorAdjustment) || 0,
+    clientRate: Number(board.clientRate) || 0,
+    clientAdjustment: Number(board.clientAdjustment) || 0,
+  }];
+}
+
 export default function CasesPage() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
@@ -217,7 +234,9 @@ export default function CasesPage() {
 // Point 3: a quick "Change Status" action next to Invoice. For a "multiple"
 // (boards) case, each board (IBCC, MOFA, HEC…) gets its own status + a
 // same-vendor/change-vendor reconfirmation (point 9). For a plain single
-// case, it's just a straight status dropdown.
+// case, it's a status dropdown with the same kind of payment protection —
+// a vendor-payment prompt on "Sent to Vendor", a vendor-balance check before
+// "Completed", and the client settle panel before a final status.
 const FINAL_STATUSES = ['Completed', 'Returned to Client'];
 const BOARD_DELIVERED_STATUSES = ['Delivered with Payment', 'Delivered without Payment'];
 
@@ -226,21 +245,36 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
   const [status, setStatus] = useState(caseObj.Document_Status);
   const [saving, setSaving] = useState(false);
   const [balance, setBalance] = useState(null); // { billed, paid, writtenOff, balance }
-  const [settleMode, setSettleMode] = useState(null); // null | 'ask' | 'pay' | 'writeoff'
+  const [settleMode, setSettleMode] = useState(null); // null | 'ask' | 'pay' | 'writeoff' | 'done'
   const [settleAmount, setSettleAmount] = useState(0);
   const [settleMethod, setSettleMethod] = useState('Cash');
   const [paymentMethods, setPaymentMethods] = useState(['Cash']);
   const [pendingAction, setPendingAction] = useState(null); // function to run once settled
 
+  // --- Single-mode vendor payment (point 3): "Sent to Vendor" prompts for
+  // an optional vendor payment; before "Completed" we check whether the
+  // vendor is fully paid and warn/offer to record the remainder.
+  const [vendorPayAmount, setVendorPayAmount] = useState(0);
+  const [vendorPayMethod, setVendorPayMethod] = useState('Cash');
+  const [vendorPaid, setVendorPaid] = useState(0);
+  const [vendorSettleMode, setVendorSettleMode] = useState(null); // null | 'ask' | 'done'
+  const vendorTotal = Number(caseObj.Vendor_Payment) || 0;
+  const vendorBalance = Math.max(vendorTotal - vendorPaid, 0);
+
   let boards = [];
   try { boards = isMultiple ? JSON.parse(caseObj.Boards_JSON) : []; } catch { boards = []; }
-  const [boardEdits, setBoardEdits] = useState(() => boards.map((b) => ({ status: b.status, vendor: b.vendor, changeVendor: false, newVendor: '', vendorRate: b.vendorRate, payAmount: 0 })));
+  const [boardEdits, setBoardEdits] = useState(() => boards.map((b) => ({ status: b.status, vendor: b.vendor, changeVendor: false, newVendor: '', vendorRate: getBoardDocuments(b)[0]?.vendorRate || 0, payAmount: 0 })));
   const [vendors, setVendors] = useState([]);
 
   useEffect(() => {
     if (isMultiple) api.getVendors().then(setVendors).catch(() => {});
     api.getCaseBalance(caseObj.Case_ID).then(setBalance).catch(() => {});
     api.getBoardTypes().then((o) => { if (o.paymentMethods?.length) setPaymentMethods(o.paymentMethods); }).catch(() => {});
+    if (!isMultiple) {
+      api.getPayments({ type: 'Vendor', caseId: caseObj.Case_ID }).then((rows) => {
+        setVendorPaid((rows || []).reduce((s, r) => s + (Number(r.Paid_Amount) || 0), 0));
+      }).catch(() => {});
+    }
   }, [isMultiple, caseObj.Case_ID]);
 
   function editBoard(i, patch) {
@@ -255,7 +289,20 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
     return boardEdits.some((be) => BOARD_DELIVERED_STATUSES.includes(be.status));
   }
 
+  // Point 3: before a single-mode case goes to "Completed", make sure the
+  // vendor has actually been paid in full — same protection multi-board
+  // cases already have on the client side.
+  function needsVendorSettling() {
+    if (isMultiple) return false;
+    return status === 'Completed' && vendorBalance > 0;
+  }
+
   function proceed(action) {
+    if (needsVendorSettling() && vendorSettleMode !== 'done') {
+      setVendorSettleMode('ask');
+      setPendingAction(() => action);
+      return;
+    }
     if (needsSettling() && settleMode !== 'done') {
       setSettleAmount(balance.balance);
       setSettleMode('ask');
@@ -285,10 +332,30 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
     } catch (e) { toast.error(e.message); } finally { setSaving(false); }
   }
 
+  async function settleVendorPay() {
+    setSaving(true);
+    try {
+      await api.addPayment({ Payment_Type: 'Vendor', Client_or_Vendor: caseObj.Vendor, Case_ID: caseObj.Case_ID, Total_Amount: vendorTotal, Paid_Amount: vendorBalance, Payment_Method: vendorPayMethod, Notes: 'Vendor payment before marking Completed' });
+      toast.success('Vendor payment recorded');
+      setVendorPaid((p) => p + vendorBalance);
+      setVendorSettleMode('done');
+      pendingAction && pendingAction();
+    } catch (e) { toast.error(e.message); } finally { setSaving(false); }
+  }
+
+  function skipVendorSettle() {
+    setVendorSettleMode('done');
+    pendingAction && pendingAction();
+  }
+
   async function saveSingle() {
     setSaving(true);
     try {
       await api.updateCase({ Case_ID: caseObj.Case_ID, Document_Status: status });
+      // Optional vendor payment recorded alongside "Sent to Vendor" (point 3).
+      if (status === 'Sent to Vendor' && Number(vendorPayAmount) > 0) {
+        await api.addPayment({ Payment_Type: 'Vendor', Client_or_Vendor: caseObj.Vendor, Case_ID: caseObj.Case_ID, Total_Amount: vendorTotal, Paid_Amount: vendorPayAmount, Payment_Method: vendorPayMethod, Notes: 'Vendor payment at Sent to Vendor' });
+      }
       toast.success('Status updated');
       onDone();
     } catch (e) { toast.error(e.message); } finally { setSaving(false); }
@@ -316,8 +383,8 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
 
   const settlePanel = settleMode === 'ask' && (
     <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-3">
-      <div className="text-sm font-semibold text-amber-800">Client ka balance abhi bhi PKR {balance.balance.toLocaleString()} baqi hai</div>
-      <p className="text-xs text-amber-700">Delivered mark karne se pehle: abhi payment le lo, ya isay loss mein book kar do.</p>
+      <div className="text-sm font-semibold text-amber-800">Client balance is still PKR {balance.balance.toLocaleString()} outstanding</div>
+      <p className="text-xs text-amber-700">Before marking as delivered: record the payment now, or book this as a loss.</p>
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="label">Amount</label>
@@ -331,9 +398,33 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
         </div>
       </div>
       <div className="flex gap-2">
-        <button type="button" disabled={saving} className="btn-primary" onClick={settlePay}>Payment Le Li — Record Karo</button>
-        <button type="button" disabled={saving} className="btn-danger" onClick={settleWriteOff}>Loss Mein Book Karo</button>
-        <button type="button" disabled={saving} className="btn-ghost" onClick={() => { setSettleMode('done'); pendingAction && pendingAction(); }}>Skip (baad mein karunga)</button>
+        <button type="button" disabled={saving} className="btn-primary" onClick={settlePay}>Payment Received — Record It</button>
+        <button type="button" disabled={saving} className="btn-danger" onClick={settleWriteOff}>Book as Loss</button>
+        <button type="button" disabled={saving} className="btn-ghost" onClick={() => { setSettleMode('done'); pendingAction && pendingAction(); }}>Skip (I'll do it later)</button>
+      </div>
+    </div>
+  );
+
+  // Point 3: single-mode vendor-balance warning shown before "Completed".
+  const vendorSettlePanel = vendorSettleMode === 'ask' && (
+    <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-3">
+      <div className="text-sm font-semibold text-amber-800">Vendor balance is still PKR {vendorBalance.toLocaleString()} unpaid</div>
+      <p className="text-xs text-amber-700">Before marking as Completed: record the vendor payment now, or skip and settle it later.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="label">Amount (full balance)</label>
+          <input type="number" className="input" value={vendorBalance} disabled />
+        </div>
+        <div>
+          <label className="label">Payment Method</label>
+          <select className="input" value={vendorPayMethod} onChange={(e) => setVendorPayMethod(e.target.value)}>
+            {paymentMethods.map((m) => <option key={m}>{m}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button type="button" disabled={saving} className="btn-primary" onClick={settleVendorPay}>Payment Made — Record It</button>
+        <button type="button" disabled={saving} className="btn-ghost" onClick={skipVendorSettle}>Skip (I'll do it later)</button>
       </div>
     </div>
   );
@@ -348,6 +439,26 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
               {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
             </select>
           </div>
+          {/* Point 3: optional vendor payment prompt on "Sent to Vendor" */}
+          {status === 'Sent to Vendor' && (
+            <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
+              <div className="text-sm font-semibold text-slate-700">Vendor Payment (optional)</div>
+              <p className="text-xs text-slate-500">Has anything been paid to the vendor so far? Enter it here — leave at 0 if not yet.</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Amount Paid</label>
+                  <input type="number" min="0" className="input" value={vendorPayAmount} onChange={(e) => setVendorPayAmount(e.target.value)} />
+                </div>
+                <div>
+                  <label className="label">Payment Method</label>
+                  <select className="input" value={vendorPayMethod} onChange={(e) => setVendorPayMethod(e.target.value)}>
+                    {paymentMethods.map((m) => <option key={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+          {vendorSettlePanel}
           {settlePanel}
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
@@ -364,13 +475,22 @@ function ChangeStatusModal({ caseObj, onClose, onDone }) {
         {boards.map((b, i) => {
           const be = boardEdits[i];
           const paidSoFar = Number(b.vendorPaid || 0);
-          const totalVendor = Number(b.vendorRate || 0) + Number(b.vendorAdjustment || 0);
+          const docs = getBoardDocuments(b);
+          const totalVendor = docs.reduce((s, d) => s + Number(d.vendorRate || 0) + Number(d.vendorAdjustment || 0), 0);
+          const docsLabel = docs.map((d) => d.documentType || '—').join(', ');
           return (
             <div key={i} className="rounded-lg border border-slate-100 p-3 space-y-2">
               <div className="flex items-center justify-between">
-                <div className="font-semibold text-sm">{b.board} <span className="text-slate-400 font-normal">({b.documentType || '—'})</span></div>
+                <div className="font-semibold text-sm">{b.board} <span className="text-slate-400 font-normal">({docsLabel})</span></div>
                 <div className="text-xs text-slate-500">Vendor payment: {paidSoFar} / {totalVendor}</div>
               </div>
+              {docs.length > 1 && (
+                <div className="text-xs text-slate-500 pl-1 space-y-0.5">
+                  {docs.map((d, di) => (
+                    <div key={di}>{d.documentType || '—'} — Vendor {Number(d.vendorRate || 0) + Number(d.vendorAdjustment || 0)} / Client {Number(d.clientRate || 0) + Number(d.clientAdjustment || 0)}</div>
+                  ))}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="label">Status</label>
@@ -439,15 +559,28 @@ function BoardsView({ boardsJson }) {
   return (
     <div className="rounded-lg border border-slate-100 p-3 space-y-2">
       <div className="text-xs font-semibold text-slate-500 uppercase">Boards</div>
-      {boards.map((b, i) => (
-        <div key={i} className="flex items-center justify-between text-sm px-2 py-1.5 rounded bg-slate-50">
-          <span className="font-medium">{b.board}</span>
-          <span className="text-slate-500 text-xs">{b.documentType || '—'}</span>
-          <span className="text-slate-500">{b.vendor || '—'}</span>
-          <span>{money(Number(b.vendorRate || 0) + Number(b.vendorAdjustment || 0))} <span className="text-xs text-slate-400">(paid {money(b.vendorPaid || 0)})</span></span>
-          <StatusBadge status={b.status} />
-        </div>
-      ))}
+      {boards.map((b, i) => {
+        const docs = getBoardDocuments(b);
+        const totalVendor = docs.reduce((s, d) => s + Number(d.vendorRate || 0) + Number(d.vendorAdjustment || 0), 0);
+        return (
+          <div key={i} className="rounded bg-slate-50 px-2 py-1.5 space-y-1">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium">{b.board}</span>
+              <span className="text-slate-500">{b.vendor || '—'}</span>
+              <span>{money(totalVendor)} <span className="text-xs text-slate-400">(paid {money(b.vendorPaid || 0)})</span></span>
+              <StatusBadge status={b.status} />
+            </div>
+            <div className="pl-2 space-y-0.5">
+              {docs.map((d, di) => (
+                <div key={di} className="flex items-center justify-between text-xs text-slate-500">
+                  <span>{d.documentType || '—'}</span>
+                  <span>Vendor {money(Number(d.vendorRate || 0) + Number(d.vendorAdjustment || 0))} / Client {money(Number(d.clientRate || 0) + Number(d.clientAdjustment || 0))}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
