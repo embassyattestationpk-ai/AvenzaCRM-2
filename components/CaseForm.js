@@ -203,7 +203,8 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
           Client_Rate: boardData[b]?.clientRate || 0,
           Client_Adjustment: boardData[b]?.clientAdjustment || 0,
         }));
-        await api.addCase({ ...payload, Case_Mode: 'multiple', Boards });
+        const boardsClientTotal = Boards.reduce((s, b) => s + Number(b.Client_Rate) + Number(b.Client_Adjustment), 0);
+        await api.addCase({ ...payload, Case_Mode: 'multiple', Boards, Client_Payment: boardsClientTotal });
         // Remember any edited rates for next time (points 5 & 6).
         Boards.forEach((b) => {
           if (isConsultant && b.Vendor) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: b.Board_Name, Rate: b.Client_Rate }).catch(() => {});
