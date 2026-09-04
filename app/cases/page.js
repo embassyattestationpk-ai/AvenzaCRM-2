@@ -30,6 +30,28 @@ function getBoardDocuments(board) {
   }];
 }
 
+// Backward-compatible reader for a single-mode case's documents (Phase 15)
+// — mirrors getCaseDocuments() in Code.gs. A single-mode case saved before
+// this phase has no Documents_JSON at all; synthesize a one-item array from
+// the legacy flat Document_Type/Vendor_Payment/Client_Payment fields so
+// every UI spot can treat both shapes the same way.
+function getCaseDocuments(c) {
+  if (!c) return [];
+  if (c.Documents_JSON) {
+    try {
+      const docs = JSON.parse(c.Documents_JSON);
+      if (Array.isArray(docs) && docs.length) return docs;
+    } catch { /* fall through */ }
+  }
+  return [{
+    documentType: c.Document_Type || '',
+    vendorRate: Number(c.Vendor_Payment) || 0,
+    vendorAdjustment: 0,
+    clientRate: Number(c.Client_Payment) || 0,
+    clientAdjustment: 0,
+  }];
+}
+
 export default function CasesPage() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
@@ -204,8 +226,11 @@ export default function CasesPage() {
           {viewing.Case_Mode === 'multiple' && viewing.Boards_JSON && (
             <BoardsView boardsJson={viewing.Boards_JSON} />
           )}
+          {viewing.Case_Mode !== 'multiple' && (
+            <SingleDocumentsView caseObj={viewing} />
+          )}
           <dl className="grid grid-cols-2 gap-3 text-sm mt-4">
-            {Object.entries(viewing).filter(([k]) => k !== 'Deleted' && k !== 'Stages_JSON' && k !== 'Boards_JSON').map(([k, v]) => (
+            {Object.entries(viewing).filter(([k]) => k !== 'Deleted' && k !== 'Stages_JSON' && k !== 'Boards_JSON' && k !== 'Documents_JSON').map(([k, v]) => (
               <div key={k}><dt className="text-slate-400 text-xs">{k}</dt><dd className="font-medium">{String(v)}</dd></div>
             ))}
           </dl>
@@ -581,6 +606,26 @@ function BoardsView({ boardsJson }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Phase 15: shows a single-mode case's ticked documents when there's more
+// than one — a legacy (or single-document) case has nothing extra to show
+// beyond the flat fields already listed in the surrounding dl, so this
+// renders nothing for it.
+function SingleDocumentsView({ caseObj }) {
+  const docs = getCaseDocuments(caseObj);
+  if (docs.length <= 1) return null;
+  return (
+    <div className="rounded-lg border border-slate-100 p-3 space-y-2">
+      <div className="text-xs font-semibold text-slate-500 uppercase">Documents</div>
+      {docs.map((d, i) => (
+        <div key={i} className="flex items-center justify-between text-xs text-slate-500 px-2 py-1.5 rounded bg-slate-50">
+          <span>{d.documentType || '—'}</span>
+          <span>Vendor {money(Number(d.vendorRate || 0) + Number(d.vendorAdjustment || 0))} / Client {money(Number(d.clientRate || 0) + Number(d.clientAdjustment || 0))}</span>
+        </div>
+      ))}
     </div>
   );
 }
