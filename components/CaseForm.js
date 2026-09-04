@@ -24,19 +24,98 @@ function getBoardDocuments(board) {
   }];
 }
 
-function emptyDocument() {
-  return { documentType: '', documentTypeOther: '', vendorRate: 0, vendorAdjustment: 0, clientRate: 0, clientAdjustment: 0 };
+function emptyDocument(documentType) {
+  return { documentType: documentType || '', documentTypeOther: '', vendorRate: 0, vendorAdjustment: 0, clientRate: 0, clientAdjustment: 0 };
 }
 
 function emptyBoardRow() {
-  return { board: '', vendor: '', documents: [emptyDocument()] };
+  // Phase 15: documents start empty — a board's documents are now TICKED
+  // from the DocumentTypes checklist (see DocumentTickList) rather than
+  // added one at a time via a free-typed "+ Add document" row.
+  return { board: '', vendor: '', documents: [], isOther: false };
 }
 
-// Resolves a document-type dropdown value + its "Other" free text into the
+// Resolves a document-type checkbox value + its "Other" free text into the
 // value actually saved (point 6): "Other" is never stored literally.
 function resolveDocType(doc) {
   if (doc.documentType === 'Other') return (doc.documentTypeOther || '').trim() || 'Other';
   return doc.documentType || '';
+}
+
+// Backward-compatible reader for a single-mode case's documents — mirrors
+// getCaseDocuments() in Code.gs (Phase 15). A single-mode case saved before
+// this phase has no Documents_JSON at all; its document detail lives only
+// in the legacy flat Document_Type/Vendor_Payment/Client_Payment fields —
+// this always synthesizes a one-item array from those so every UI spot can
+// treat both shapes the same way.
+function getCaseDocuments(c) {
+  if (!c) return [];
+  if (c.Documents_JSON) {
+    try {
+      const docs = JSON.parse(c.Documents_JSON);
+      if (Array.isArray(docs) && docs.length) return docs;
+    } catch { /* fall through */ }
+  }
+  return [{
+    documentType: c.Document_Type || '',
+    vendorRate: Number(c.Vendor_Payment) || 0,
+    vendorAdjustment: 0,
+    clientRate: Number(c.Client_Payment) || 0,
+    clientAdjustment: 0,
+  }];
+}
+
+// Reusable tick-box document picker (Phase 15) — used both for a board's
+// documents (multi-mode) and for a single-mode case's documents. Ticking a
+// document type from the DocumentTypes list (which already includes an
+// "Other" entry — same free-text pattern Phase 14 built) adds a rate row
+// below the checklist; unticking removes it.
+function DocumentTickList({ docTypes, documents, onToggle, onOtherText, onRateChange, embassyLabel }) {
+  const otherDoc = documents.find((d) => d.documentType === 'Other');
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-1 rounded bg-white border border-slate-100 p-2 max-h-40 overflow-y-auto">
+        {docTypes.map((dt) => {
+          const checked = documents.some((d) => d.documentType === dt.Name);
+          return (
+            <label key={dt.Type_ID} className="flex items-center gap-1.5 text-xs">
+              <input type="checkbox" checked={checked} onChange={(e) => onToggle(dt.Name, e.target.checked)} />
+              {dt.Category} — {dt.Name}
+            </label>
+          );
+        })}
+      </div>
+      {otherDoc && (
+        <input className="input" placeholder="Type the document name" value={otherDoc.documentTypeOther || ''} onChange={(e) => onOtherText(e.target.value)} />
+      )}
+      {!documents.length && <p className="text-xs text-slate-400">No documents ticked yet.</p>}
+      {documents.map((d, di) => (
+        <div key={di} className="rounded bg-slate-50 border border-slate-100 p-2 space-y-2">
+          <div className="text-xs font-medium text-slate-600">
+            {d.documentType === 'Other' ? (d.documentTypeOther || 'Other') : (d.documentType || '—')}{embassyLabel || ''}
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            <div>
+              <label className="label">Vendor Rate</label>
+              <input type="number" className="input" value={d.vendorRate} onChange={(e) => onRateChange(di, { vendorRate: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Vendor Adj (+/-)</label>
+              <input type="number" className="input" value={d.vendorAdjustment} onChange={(e) => onRateChange(di, { vendorAdjustment: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Client Rate</label>
+              <input type="number" className="input" value={d.clientRate} onChange={(e) => onRateChange(di, { clientRate: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Client Adj (+/-)</label>
+              <input type="number" className="input" value={d.clientAdjustment} onChange={(e) => onRateChange(di, { clientAdjustment: e.target.value })} />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export default function CaseForm({ initial, onSaved, onCancel }) {
@@ -74,17 +153,38 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     ...initial,
   }));
 
-  const [baseRate, setBaseRate] = useState(0);
   const [paymentMethods, setPaymentMethods] = useState(['Cash']);
 
-  // --- "Multiple" (board) mode state — point 7/8/9 ---
-  // Board name is now free text (point 8) — boardTypes is only used as
-  // datalist autocomplete suggestions, not a fixed dropdown. Each board can
-  // hold multiple documents (point 7), each with its own rates.
+  // --- "Multiple" (board) mode state (Phase 15) ---
+  // Board is picked from the fixed BOARD_TYPES list via a TICK-BOX list
+  // (checking IBCC + MOFA + Qatar Embassy in one go adds three board rows),
+  // plus an "Other" checkbox revealing free text for a board not on the
+  // list. Each ticked board can hold multiple TICKED documents, each with
+  // its own rates (Phase 14's per-document rate row UI, unchanged).
   const [boardRows, setBoardRows] = useState([]);
+  const [otherBoardName, setOtherBoardName] = useState('');
   const isEditingBoardsCase = isEdit && initial?.Case_Mode === 'multiple' && initial?.Boards_JSON;
   let existingBoards = [];
   try { existingBoards = isEditingBoardsCase ? JSON.parse(initial.Boards_JSON) : []; } catch { existingBoards = []; }
+
+  // --- Single-mode documents (Phase 15) — a single-mode case can now also
+  // hold multiple TICKED documents (same DocumentTypes checklist + Other),
+  // each with its own rate row. Pre-filled from the case's existing
+  // documents when editing (via getCaseDocuments(), which synthesizes one
+  // item from the legacy flat fields for a pre-Phase-15 case).
+  const [singleDocuments, setSingleDocuments] = useState(() => {
+    if (isEdit && initial && initial.Case_Mode !== 'multiple') {
+      return getCaseDocuments(initial).map((d) => ({
+        documentType: d.documentType || '',
+        documentTypeOther: '',
+        vendorRate: Number(d.vendorRate) || 0,
+        vendorAdjustment: Number(d.vendorAdjustment) || 0,
+        clientRate: Number(d.clientRate) || 0,
+        clientAdjustment: Number(d.clientAdjustment) || 0,
+      }));
+    }
+    return [];
+  });
 
   const [newClientOpen, setNewClientOpen] = useState(false);
   const [newVendorOpen, setNewVendorOpen] = useState(false);
@@ -116,72 +216,141 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     }
   }
 
-  // --- Single mode: auto-fetch Service+Vendor rate (Walk-in) or
-  // Consultant+Service rate (Consultant), editable on top — points 5 & 6.
+  // --- Single mode (Phase 15): auto-fetch a rate PER TICKED DOCUMENT —
+  // Consultant+DocumentType rate (Consultant) or DocumentType+Vendor rate
+  // (Walk-in) — same idea as the per-board auto-suggest below, keyed by
+  // document type instead of board name since a single-mode case no longer
+  // has one flat rate.
   useEffect(() => {
-    if (isEdit || isMultiple) return;
-    if (isConsultant) {
-      if (!form.Client_Name || !form.Service) return;
-      api.getConsultantRates({ consultant: form.Client_Name, board: form.Service }).then((rates) => {
+    if (isEdit || isMultiple || !isConsultant || !form.Client_Name) return;
+    singleDocuments.forEach((doc, idx) => {
+      const key = doc.documentType === 'Other' ? (doc.documentTypeOther || '').trim() : doc.documentType;
+      if (!key) return;
+      api.getConsultantRates({ consultant: form.Client_Name, board: key }).then((rates) => {
         const r = rates && rates[0];
-        setBaseRate(r ? Number(r.Rate) : 0);
+        if (r) setSingleDocument(idx, { clientRate: Number(r.Rate) });
       }).catch(() => {});
-    } else {
-      if (!form.Service || !form.Vendor) return;
-      api.getServiceRates({ service: form.Service, vendor: form.Vendor }).then((rates) => {
-        const r = rates && rates[0];
-        setBaseRate(r ? Number(r.Rate) : 0);
-      }).catch(() => {});
-    }
-  }, [form.Service, form.Vendor, form.Client_Name, isConsultant, isMultiple, isEdit]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEdit, isMultiple, isConsultant, form.Client_Name, singleDocuments.map((d) => d.documentType).join(',')]);
 
   useEffect(() => {
-    if (isEdit || isMultiple) return;
-    if (isConsultant) {
-      set('Client_Payment', Number(baseRate || 0) + Number(form.Special_Rate_Adjustment || 0));
-    } else {
-      set('Vendor_Payment', Number(baseRate || 0) + Number(form.Special_Rate_Adjustment || 0));
-    }
-  }, [baseRate, form.Special_Rate_Adjustment, isConsultant, isMultiple, isEdit]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (isEdit || isMultiple || isConsultant || !form.Vendor) return;
+    singleDocuments.forEach((doc, idx) => {
+      const key = doc.documentType === 'Other' ? (doc.documentTypeOther || '').trim() : doc.documentType;
+      if (!key) return;
+      api.getServiceRates({ service: key, vendor: form.Vendor }).then((rates) => {
+        const r = rates && rates[0];
+        if (r) setSingleDocument(idx, { vendorRate: Number(r.Rate) });
+      }).catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEdit, isMultiple, isConsultant, form.Vendor, singleDocuments.map((d) => d.documentType).join(',')]);
 
   // Total (Gross) amount the client is being billed — shown next to the
-  // Advance Payment box (point 9) so staff can see the total while deciding
-  // the advance amount, not just the Profit figure.
+  // Advance Payment box so staff can see the total while deciding the
+  // advance amount, not just the Profit figure. Phase 15: single mode's
+  // total is now the sum of every TICKED document's client rate, same idea
+  // as multi-mode's board/document sum.
   const grossTotal = useMemo(() => {
     if (isMultiple) {
       return boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0);
     }
-    return Number(form.Client_Payment) || 0;
-  }, [isMultiple, boardRows, form.Client_Payment]);
+    return singleDocuments.reduce((s, d) => s + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0);
+  }, [isMultiple, boardRows, singleDocuments]);
+
+  const singleVendorTotal = useMemo(() => (
+    singleDocuments.reduce((s, d) => s + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0)
+  ), [singleDocuments]);
 
   const profit = useMemo(() => {
     if (isMultiple) {
       const vp = boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0);
       return grossTotal - vp;
     }
-    return (Number(form.Client_Payment) || 0) - (Number(form.Vendor_Payment) || 0);
-  }, [isMultiple, boardRows, grossTotal, form.Client_Payment, form.Vendor_Payment]);
+    return grossTotal - singleVendorTotal;
+  }, [isMultiple, boardRows, grossTotal, singleVendorTotal]);
 
-  function addBoardRow() {
-    setBoardRows((rows) => [...rows, emptyBoardRow()]);
-  }
-  function removeBoardRow(idx) {
-    setBoardRows((rows) => rows.filter((_, i) => i !== idx));
-  }
   function setBoardRow(idx, patch) {
     setBoardRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-  }
-  function addDocument(boardIdx) {
-    setBoardRows((rows) => rows.map((r, i) => (i === boardIdx ? { ...r, documents: [...r.documents, emptyDocument()] } : r)));
-  }
-  function removeDocument(boardIdx, docIdx) {
-    setBoardRows((rows) => rows.map((r, i) => (i === boardIdx ? { ...r, documents: r.documents.filter((_, di) => di !== docIdx) } : r)));
   }
   function setDocument(boardIdx, docIdx, patch) {
     setBoardRows((rows) => rows.map((r, i) => (
       i === boardIdx ? { ...r, documents: r.documents.map((d, di) => (di === docIdx ? { ...d, ...patch } : d)) } : r
     )));
   }
+
+  // --- Board tick-box list (Phase 15): ticking a fixed BOARD_TYPES entry
+  // adds a board row, unticking removes it. "Other" is a separate checkbox
+  // (BOARD_TYPES has no literal "Other" entry) that reveals free text for a
+  // board/service not on the fixed list.
+  function toggleBoardType(name, checked) {
+    setBoardRows((rows) => (
+      checked ? [...rows, { ...emptyBoardRow(), board: name }]
+        : rows.filter((r) => !(r.board === name && !r.isOther))
+    ));
+  }
+  function toggleOtherBoard(checked) {
+    if (checked) {
+      setBoardRows((rows) => [...rows, { ...emptyBoardRow(), board: otherBoardName, isOther: true }]);
+    } else {
+      setBoardRows((rows) => rows.filter((r) => !r.isOther));
+      setOtherBoardName('');
+    }
+  }
+  function updateOtherBoardName(name) {
+    setOtherBoardName(name);
+    setBoardRows((rows) => rows.map((r) => (r.isOther ? { ...r, board: name } : r)));
+  }
+
+  // --- A board's document tick-box list (Phase 15): ticking a DocumentTypes
+  // entry (which already includes "Other") adds a document row to that
+  // board; unticking removes it.
+  function toggleBoardDocument(boardIdx, name, checked) {
+    setBoardRows((rows) => rows.map((r, i) => {
+      if (i !== boardIdx) return r;
+      if (checked) return { ...r, documents: [...r.documents, emptyDocument(name)] };
+      return { ...r, documents: r.documents.filter((d) => d.documentType !== name) };
+    }));
+  }
+  function setBoardOtherDocText(boardIdx, text) {
+    setBoardRows((rows) => rows.map((r, i) => (
+      i === boardIdx ? { ...r, documents: r.documents.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)) } : r
+    )));
+  }
+
+  // --- Single-mode document tick-box list (Phase 15) ---
+  function toggleSingleDocument(name, checked) {
+    setSingleDocuments((docs) => (
+      checked ? [...docs, emptyDocument(name)] : docs.filter((d) => d.documentType !== name)
+    ));
+  }
+  function setSingleDocument(idx, patch) {
+    setSingleDocuments((docs) => docs.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+  }
+  function setSingleOtherDocText(text) {
+    setSingleDocuments((docs) => docs.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)));
+  }
+
+  // Resolves one single-mode ticked document's saved Document_Type: "Other"
+  // free text (same pattern as resolveDocType) plus, when Service =
+  // "Embassy Attestation", the chosen embassy appended per-document — e.g.
+  // "PCC - Qatar Embassy". Implementation choice (Phase 15): the embassy
+  // pick stays a single case-level control (Service is still one field per
+  // case), but now that a single-mode case can have several documents, the
+  // resulting embassy name is appended to EVERY ticked document instead of
+  // one flat case-level Document_Type.
+  function resolveSingleDocType(doc) {
+    let base = resolveDocType(doc);
+    if (isEmbassyService && form.Embassy) {
+      const embassyName = form.Embassy === 'Other' ? ((form.Embassy_Other || '').trim() || 'Other') : form.Embassy;
+      base = base ? `${base} - ${embassyName}` : `Embassy Attestation - ${embassyName}`;
+    }
+    return base;
+  }
+  const singleEmbassyLabel = isEmbassyService && form.Embassy
+    ? ` — ${form.Embassy === 'Other' ? ((form.Embassy_Other || '').trim() || 'Other') : form.Embassy}`
+    : '';
 
   // Auto-fetch rates when a board's vendor is picked — applies to the
   // board's first document, same idea as before (point 5/6 rate lookups).
@@ -233,27 +402,28 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     } catch (e) { toast.error(e.message); }
   }
 
-  // Resolves the final Document_Type saved on the case: "Other" free text
-  // (point 6) plus, when the Service is "Embassy Attestation", the chosen
-  // embassy appended (point 5) — e.g. "PCC - Qatar Embassy".
-  function resolveCaseDocumentType() {
-    let base = form.Document_Type === 'Other' ? ((form.Document_Type_Other || '').trim() || 'Other') : (form.Document_Type || '');
-    if (isEmbassyService && form.Embassy) {
-      const embassyName = form.Embassy === 'Other' ? ((form.Embassy_Other || '').trim() || 'Other') : form.Embassy;
-      base = base ? `${base} - ${embassyName}` : `Embassy Attestation - ${embassyName}`;
-    }
-    return base;
+  // Builds the Documents payload for a single-mode case from every ticked
+  // singleDocuments row — Code.gs sums these into Vendor_Payment/
+  // Client_Payment and stores the array in Documents_JSON (Phase 15).
+  function buildSingleDocumentsPayload() {
+    return singleDocuments.map((d) => ({
+      Document_Type: resolveSingleDocType(d),
+      Vendor_Rate: Number(d.vendorRate) || 0,
+      Vendor_Adjustment: Number(d.vendorAdjustment) || 0,
+      Client_Rate: Number(d.clientRate) || 0,
+      Client_Adjustment: Number(d.clientAdjustment) || 0,
+    }));
   }
 
   async function submit(e) {
     e.preventDefault();
     if (!form.Client_Name) return toast.error('Client name is required');
-    if (isMultiple && !boardRows.length) return toast.error('Add at least one board');
+    if (isMultiple && !boardRows.length) return toast.error('Tick at least one board');
     if (isMultiple && boardRows.some((r) => !r.board.trim())) return toast.error('Every board needs a name');
     setSaving(true);
     try {
       const user = getCurrentUser();
-      const payload = { ...form, Added_By: initial?.Added_By || user?.fullName || '', Document_Type: resolveCaseDocumentType() };
+      const payload = { ...form, Added_By: initial?.Added_By || user?.fullName || '' };
 
       // Keep the client's own ID Card Number / Company in sync with what was
       // (re)typed on the case form, for an already-existing client.
@@ -263,6 +433,11 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
 
       if (isEdit) {
         payload.Profit = profit;
+        if (!isMultiple) {
+          payload.Documents = buildSingleDocumentsPayload();
+          payload.Client_Payment = grossTotal;
+          payload.Vendor_Payment = singleVendorTotal;
+        }
         await api.updateCase({ ...payload, Case_ID: initial.Case_ID });
         toast.success('Case updated');
       } else if (isMultiple) {
@@ -289,14 +464,22 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         });
         toast.success(`Case added — ${Boards.length} board(s)`);
       } else {
+        const Documents = buildSingleDocumentsPayload();
         payload.Profit = profit;
         payload.Case_Mode = 'single';
+        payload.Documents = Documents;
+        payload.Client_Payment = grossTotal;
+        payload.Vendor_Payment = singleVendorTotal;
         await api.addCase(payload);
-        if (isConsultant && form.Client_Name && form.Service) {
-          api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: form.Service, Rate: form.Client_Payment }).catch(() => {});
-        } else if (form.Vendor && form.Service) {
-          api.upsertServiceRate({ Vendor_Name: form.Vendor, Service_Name: form.Service, Rate: form.Vendor_Payment }).catch(() => {});
-        }
+        // Remember any edited rates for next time, per ticked document —
+        // same idea as the board rate-remembering above, keyed by document
+        // type instead of board name.
+        Documents.forEach((d) => {
+          const key = d.Document_Type || form.Service;
+          if (!key) return;
+          if (isConsultant && form.Client_Name) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: key, Rate: d.Client_Rate }).catch(() => {});
+          else if (form.Vendor) api.upsertServiceRate({ Vendor_Name: form.Vendor, Service_Name: key, Rate: d.Vendor_Rate }).catch(() => {});
+        });
         toast.success('Case added');
       }
       onSaved && onSaved();
@@ -408,17 +591,6 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
                 </div>
               )}
             </div>
-            <div>
-              <label className="label">Document Type</label>
-              <select className="input" value={form.Document_Type} onChange={(e) => set('Document_Type', e.target.value)}>
-                <option value="">Select document type</option>
-                {docTypes.map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
-              </select>
-              {/* Point 6: "Other" free text */}
-              {form.Document_Type === 'Other' && (
-                <input className="input mt-2" placeholder="Type the document name" value={form.Document_Type_Other} onChange={(e) => set('Document_Type_Other', e.target.value)} />
-              )}
-            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -436,31 +608,26 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
                 )}
               </div>
             )}
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="label"># of Documents</label>
               <input type="number" min="0" className="input" value={form.No_of_Documents} onChange={(e) => set('No_of_Documents', e.target.value)} />
             </div>
-            {!isConsultant && (
-              <div>
-                <label className="label">Vendor Payment {baseRate > 0 ? <span className="text-xs text-slate-400">(rate: {baseRate})</span> : null}</label>
-                <input type="number" min="0" className="input" value={form.Vendor_Payment} onChange={(e) => set('Vendor_Payment', e.target.value)} />
-              </div>
-            )}
-            <div>
-              <label className="label">Client Payment {isConsultant && baseRate > 0 ? <span className="text-xs text-slate-400">(rate: {baseRate})</span> : null}</label>
-              <input type="number" min="0" className="input" value={form.Client_Payment} onChange={(e) => set('Client_Payment', e.target.value)} />
-            </div>
           </div>
 
-          {!isEdit && (
-            <div>
-              <label className="label">Special Rate Adjustment (+/-, on top of the auto-fetched rate)</label>
-              <input type="number" className="input" value={form.Special_Rate_Adjustment} onChange={(e) => set('Special_Rate_Adjustment', e.target.value)} />
-            </div>
-          )}
+          {/* Phase 15: documents are ticked from the DocumentTypes checklist
+              (+ Other) instead of a single flat dropdown — each ticked
+              document gets its own Vendor/Client rate row below. */}
+          <div>
+            <label className="label">Documents (tick all that apply to this case)</label>
+            <DocumentTickList
+              docTypes={docTypes}
+              documents={singleDocuments}
+              onToggle={toggleSingleDocument}
+              onOtherText={setSingleOtherDocText}
+              onRateChange={setSingleDocument}
+              embassyLabel={singleEmbassyLabel}
+            />
+          </div>
         </>
       )}
 
@@ -488,88 +655,55 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         </div>
       )}
 
-      {/* --- MULTIPLE mode: point 7/8/9, free-text board name + repeatable
-          per-board documents, each with its own rates --- */}
+      {/* --- MULTIPLE mode (Phase 15): boards are TICKED from the fixed
+          BOARD_TYPES list (+ Other) instead of typed one at a time; each
+          ticked board's documents are, in turn, TICKED from the
+          DocumentTypes list (+ Other), each with its own rate row. --- */}
       {isMultiple && !isEdit && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <label className="label mb-0">Boards / Documents to process</label>
-            <button type="button" className="text-brand-600 text-xs font-medium" onClick={addBoardRow}>+ Add board</button>
+          <label className="label mb-0">Boards / Services (tick all that apply)</label>
+          <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-50 border border-slate-100 p-3">
+            {boardTypes.map((bt) => {
+              const checked = boardRows.some((r) => r.board === bt && !r.isOther);
+              return (
+                <label key={bt} className="flex items-center gap-1.5 text-sm">
+                  <input type="checkbox" checked={checked} onChange={(e) => toggleBoardType(bt, e.target.checked)} />
+                  {bt}
+                </label>
+              );
+            })}
+            <label className="flex items-center gap-1.5 text-sm">
+              <input type="checkbox" checked={boardRows.some((r) => r.isOther)} onChange={(e) => toggleOtherBoard(e.target.checked)} />
+              Other
+            </label>
           </div>
-          <datalist id="board-types-list">{boardTypes.map((b) => <option key={b} value={b} />)}</datalist>
+          {boardRows.some((r) => r.isOther) && (
+            <input className="input" placeholder="Type a board/service name" value={otherBoardName} onChange={(e) => updateOtherBoardName(e.target.value)} />
+          )}
 
-          {!boardRows.length && <p className="text-xs text-slate-400">No boards added yet — click "+ Add board" to start (e.g. IBCC, MOFA, Qatar Embassy…).</p>}
+          {!boardRows.length && <p className="text-xs text-slate-400">No boards ticked yet — tick one above to start (e.g. IBCC, MOFA, Qatar Embassy…).</p>}
 
           {boardRows.map((row, bi) => (
             <div key={bi} className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
-              <div className="grid grid-cols-2 gap-3 items-end">
-                <div>
-                  <label className="label">Board Name</label>
-                  <input
-                    className="input"
-                    list="board-types-list"
-                    placeholder="Type a board name (e.g. IBCC, Qatar Embassy)"
-                    value={row.board}
-                    onChange={(e) => setBoardRow(bi, { board: e.target.value })}
-                  />
-                </div>
-                <div className="flex items-end gap-2">
-                  <div className="flex-1">
-                    <label className="label">Vendor for this board</label>
-                    <select className="input" value={row.vendor} onChange={(e) => onBoardVendorChange(bi, e.target.value)}>
-                      <option value="">Select vendor</option>
-                      {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
-                    </select>
-                  </div>
-                  <button type="button" className="btn-danger" onClick={() => removeBoardRow(bi)}>Remove Board</button>
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-semibold text-sm">{row.board || '(untitled board)'}</div>
+                <div className="flex-1 max-w-xs">
+                  <select className="input" value={row.vendor} onChange={(e) => onBoardVendorChange(bi, e.target.value)}>
+                    <option value="">Select vendor for this board</option>
+                    {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
+                  </select>
                 </div>
               </div>
 
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-semibold text-slate-500 uppercase">Documents in this board</div>
-                  <button type="button" className="text-brand-600 text-xs font-medium" onClick={() => addDocument(bi)}>+ Add document</button>
-                </div>
-                {row.documents.map((doc, di) => (
-                  <div key={di} className="rounded bg-white border border-slate-100 p-2 space-y-2">
-                    <div className="grid grid-cols-2 gap-3 items-end">
-                      <div>
-                        <label className="label">Document Type</label>
-                        <select className="input" value={doc.documentType} onChange={(e) => setDocument(bi, di, { documentType: e.target.value })}>
-                          <option value="">Select document type</option>
-                          {docTypes.map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
-                        </select>
-                        {/* Point 6: "Other" free text, per document */}
-                        {doc.documentType === 'Other' && (
-                          <input className="input mt-2" placeholder="Type the document name" value={doc.documentTypeOther} onChange={(e) => setDocument(bi, di, { documentTypeOther: e.target.value })} />
-                        )}
-                      </div>
-                      {row.documents.length > 1 && (
-                        <div className="text-right">
-                          <button type="button" className="btn-ghost text-xs" onClick={() => removeDocument(bi, di)}>Remove document</button>
-                        </div>
-                      )}
-                    </div>
-                    <div className="grid grid-cols-4 gap-3">
-                      <div>
-                        <label className="label">Vendor Rate</label>
-                        <input type="number" className="input" value={doc.vendorRate} onChange={(e) => setDocument(bi, di, { vendorRate: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="label">Vendor Adj (+/-)</label>
-                        <input type="number" className="input" value={doc.vendorAdjustment} onChange={(e) => setDocument(bi, di, { vendorAdjustment: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="label">Client Rate {isConsultant ? <span className="text-xs text-slate-400">(auto)</span> : ''}</label>
-                        <input type="number" className="input" value={doc.clientRate} onChange={(e) => setDocument(bi, di, { clientRate: e.target.value })} />
-                      </div>
-                      <div>
-                        <label className="label">Client Adj (+/-)</label>
-                        <input type="number" className="input" value={doc.clientAdjustment} onChange={(e) => setDocument(bi, di, { clientAdjustment: e.target.value })} />
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                <div className="text-xs font-semibold text-slate-500 uppercase">Documents in this board (tick all that apply)</div>
+                <DocumentTickList
+                  docTypes={docTypes}
+                  documents={row.documents}
+                  onToggle={(name, checked) => toggleBoardDocument(bi, name, checked)}
+                  onOtherText={(text) => setBoardOtherDocText(bi, text)}
+                  onRateChange={(di, patch) => setDocument(bi, di, patch)}
+                />
               </div>
             </div>
           ))}
