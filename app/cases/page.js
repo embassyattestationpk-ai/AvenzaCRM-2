@@ -52,12 +52,250 @@ function getCaseDocuments(c) {
   }];
 }
 
+// PHASE 16 (Part A) — read-only view of a services-mode case's services and
+// their documents. A services-mode case always has Services_JSON already
+// (written at creation, or the first time updateDocumentStatus upgraded a
+// legacy case), so no legacy synthesis is needed here — the backward-
+// compatible synthesis for old cases lives server-side in getCaseServices()
+// and is only reached when a bulk update is actually performed on them (via
+// BulkDocumentModal, which fetches through the getCaseServices action).
+function ServicesView({ servicesJson }) {
+  let services = [];
+  try { services = JSON.parse(servicesJson); } catch { services = []; }
+  return (
+    <div className="rounded-lg border border-slate-100 p-3 space-y-2">
+      <div className="text-xs font-semibold text-slate-500 uppercase">Services</div>
+      {services.map((sv) => (
+        <div key={sv.serviceId} className="rounded bg-slate-50 px-2 py-1.5 space-y-1">
+          <div className="text-sm font-medium">{sv.service}{sv.urgency ? ` (${sv.urgency})` : ''}</div>
+          <div className="pl-2 space-y-0.5">
+            {(sv.documents || []).map((d) => (
+              <div key={d.docId} className="flex items-center justify-between text-xs text-slate-500 gap-2">
+                <span className="flex-1">{d.documentType || '—'} — {d.vendor || 'no vendor'}</span>
+                <span>Vendor {money(Number(d.vendorRate || 0) + Number(d.vendorAdjustment || 0))} / Client {money(Number(d.clientRate || 0) + Number(d.clientAdjustment || 0))}</span>
+                <StatusBadge status={d.status} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The bulk cross-service status/vendor/payment update panel — replaces
+// "Change Status" for any case that already has Services_JSON (every new
+// case, plus any legacy case that's been bulk-updated once before, since
+// that upgrades it in place). Ticking any combination of documents across
+// any number of services and applying one action to all of them is the
+// confirmed core requirement of this phase; a single-document update is
+// just this same UI with one checkbox ticked, no separate code path.
+const DOC_TERMINAL_STATUSES = ['Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
+
+function BulkDocumentModal({ caseObj, onClose, onDone }) {
+  const [loading, setLoading] = useState(true);
+  const [services, setServices] = useState([]);
+  const [vendors, setVendors] = useState([]);
+  const [paymentMethods, setPaymentMethods] = useState(['Cash']);
+  const [selected, setSelected] = useState({});
+  const [saving, setSaving] = useState(false);
+
+  const [applyStatus, setApplyStatus] = useState(false);
+  const [status, setStatus] = useState(BOARD_STATUS_OPTIONS[0]);
+  const [applyVendor, setApplyVendor] = useState(false);
+  const [vendor, setVendor] = useState('');
+  const [vendorRate, setVendorRate] = useState('');
+  const [applySent, setApplySent] = useState(false);
+  const [sentDate, setSentDate] = useState('');
+  const [applyReceived, setApplyReceived] = useState(false);
+  const [receivedDate, setReceivedDate] = useState('');
+  const [applyVendorPay, setApplyVendorPay] = useState(false);
+  const [vendorPayAmount, setVendorPayAmount] = useState(0);
+  const [applyNotes, setApplyNotes] = useState(false);
+  const [notes, setNotes] = useState('');
+
+  const [balance, setBalance] = useState(null);
+  const [settleMode, setSettleMode] = useState(null); // null | 'ask' | 'done'
+  const [settleAmount, setSettleAmount] = useState(0);
+  const [settleMethod, setSettleMethod] = useState('Cash');
+
+  useEffect(() => {
+    Promise.all([
+      api.getCaseServices(caseObj.Case_ID),
+      api.getVendors(),
+      api.getBoardTypes(),
+      api.getCaseBalance(caseObj.Case_ID),
+    ]).then(([svc, v, bt, bal]) => {
+      setServices(svc.services || []);
+      setVendors(v);
+      if (bt.paymentMethods?.length) setPaymentMethods(bt.paymentMethods);
+      setBalance(bal);
+    }).catch((e) => toast.error(e.message)).finally(() => setLoading(false));
+  }, [caseObj.Case_ID]);
+
+  function toggle(serviceId, docId) {
+    const key = `${serviceId}::${docId}`;
+    setSelected((s) => ({ ...s, [key]: !s[key] }));
+  }
+  const selectedKeys = Object.keys(selected).filter((k) => selected[k]);
+
+  function buildUpdates() {
+    return selectedKeys.map((key) => {
+      const [serviceId, docId] = key.split('::');
+      const svc = services.find((s) => s.serviceId === serviceId);
+      const doc = svc?.documents.find((d) => d.docId === docId);
+      const u = { serviceId, docId };
+      if (applyStatus) u.status = status;
+      if (applyVendor) {
+        u.vendor = vendor;
+        if (vendorRate !== '') u.vendorRate = Number(vendorRate);
+      }
+      if (applySent) u.sentDate = sentDate;
+      if (applyReceived) u.receivedDate = receivedDate;
+      if (applyVendorPay && Number(vendorPayAmount) > 0 && doc) {
+        u.vendorPaid = (Number(doc.vendorPaid) || 0) + Number(vendorPayAmount);
+      }
+      if (applyNotes) u.notes = notes;
+      return u;
+    });
+  }
+
+  // Point (Phase 16 balance popup): don't silently mark documents delivered
+  // while the client still owes money — same settle-balance UX carried
+  // forward from the legacy Change Status flow.
+  function willMarkFinal() {
+    return applyStatus && DOC_TERMINAL_STATUSES.includes(status);
+  }
+
+  function proceed() {
+    if (!selectedKeys.length) { toast.error('Select at least one document'); return; }
+    if (willMarkFinal() && balance && balance.balance > 0 && settleMode !== 'done') {
+      setSettleAmount(balance.balance);
+      setSettleMode('ask');
+      return;
+    }
+    save();
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.updateDocumentStatus({ Case_ID: caseObj.Case_ID, Updates: buildUpdates() });
+      toast.success(`${selectedKeys.length} document(s) updated`);
+      onDone();
+    } catch (e) { toast.error(e.message); } finally { setSaving(false); }
+  }
+
+  async function settlePay() {
+    setSaving(true);
+    try {
+      await api.addPayment({ Payment_Type: 'Client', Client_or_Vendor: caseObj.Client_Name, Case_ID: caseObj.Case_ID, Total_Amount: balance.billed, Paid_Amount: settleAmount, Payment_Method: settleMethod, Notes: 'Payment at delivery' });
+      toast.success('Payment recorded');
+      setSettleMode('done');
+      await save();
+    } catch (e) { toast.error(e.message); setSaving(false); }
+  }
+  async function settleWriteOff() {
+    setSaving(true);
+    try {
+      await api.writeOffCase({ Case_ID: caseObj.Case_ID, Amount: settleAmount });
+      toast.success('Booked as loss');
+      setSettleMode('done');
+      await save();
+    } catch (e) { toast.error(e.message); setSaving(false); }
+  }
+  function skipSettle() { setSettleMode('done'); save(); }
+
+  const settlePanel = settleMode === 'ask' && balance && (
+    <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-3">
+      <div className="text-sm font-semibold text-amber-800">Client balance is still PKR {balance.balance.toLocaleString()} outstanding</div>
+      <p className="text-xs text-amber-700">Before marking as delivered: record the payment now, or book this as a loss.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="label">Amount</label><input type="number" className="input" value={settleAmount} onChange={(e) => setSettleAmount(e.target.value)} /></div>
+        <div><label className="label">Payment Method</label><select className="input" value={settleMethod} onChange={(e) => setSettleMethod(e.target.value)}>{paymentMethods.map((m) => <option key={m}>{m}</option>)}</select></div>
+      </div>
+      <div className="flex gap-2">
+        <button type="button" disabled={saving} className="btn-primary" onClick={settlePay}>Payment Received — Record It</button>
+        <button type="button" disabled={saving} className="btn-danger" onClick={settleWriteOff}>Book as Loss</button>
+        <button type="button" disabled={saving} className="btn-ghost" onClick={skipSettle}>Skip (I'll do it later)</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <Modal title={`Update Documents — ${caseObj.Case_ID}`} onClose={onClose} width="max-w-3xl">
+      {loading ? <div className="text-sm text-slate-400">Loading…</div> : (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-100 divide-y divide-slate-50 max-h-64 overflow-y-auto">
+            {!services.length && <div className="p-3 text-sm text-slate-400">No services on this case.</div>}
+            {services.map((sv) => (
+              <div key={sv.serviceId} className="p-2">
+                <div className="text-xs font-semibold text-slate-500 uppercase mb-1">{sv.service}{sv.urgency ? ` (${sv.urgency})` : ''}</div>
+                {(sv.documents || []).map((d) => {
+                  const key = `${sv.serviceId}::${d.docId}`;
+                  return (
+                    <label key={d.docId} className="flex items-center gap-2 text-sm px-1 py-1 hover:bg-slate-50 rounded cursor-pointer">
+                      <input type="checkbox" checked={!!selected[key]} onChange={() => toggle(sv.serviceId, d.docId)} />
+                      <span className="flex-1">{d.documentType || '—'}</span>
+                      <span className="text-slate-400 text-xs">{d.vendor || 'no vendor'}</span>
+                      <StatusBadge status={d.status} />
+                    </label>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-slate-500">{selectedKeys.length} document(s) selected — select any combination across service(s), even just one, and apply one action to all of them below.</p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded border border-slate-100 p-2 space-y-1">
+              <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyStatus} onChange={(e) => setApplyStatus(e.target.checked)} /> Set Status</label>
+              <select className="input" disabled={!applyStatus} value={status} onChange={(e) => setStatus(e.target.value)}>{BOARD_STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}</select>
+            </div>
+            <div className="rounded border border-slate-100 p-2 space-y-1">
+              <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyVendor} onChange={(e) => setApplyVendor(e.target.checked)} /> Set / Change Vendor</label>
+              <select className="input" disabled={!applyVendor} value={vendor} onChange={(e) => setVendor(e.target.value)}>
+                <option value="">Select vendor</option>
+                {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
+              </select>
+              <input type="number" className="input" placeholder="New vendor rate (optional)" disabled={!applyVendor} value={vendorRate} onChange={(e) => setVendorRate(e.target.value)} />
+            </div>
+            <div className="rounded border border-slate-100 p-2 space-y-1">
+              <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applySent} onChange={(e) => setApplySent(e.target.checked)} /> Set Sent Date</label>
+              <input type="date" className="input" disabled={!applySent} value={sentDate} onChange={(e) => setSentDate(e.target.value)} />
+            </div>
+            <div className="rounded border border-slate-100 p-2 space-y-1">
+              <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyReceived} onChange={(e) => setApplyReceived(e.target.checked)} /> Set Received Date</label>
+              <input type="date" className="input" disabled={!applyReceived} value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} />
+            </div>
+            <div className="rounded border border-slate-100 p-2 space-y-1">
+              <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyVendorPay} onChange={(e) => setApplyVendorPay(e.target.checked)} /> Record Vendor Payment</label>
+              <input type="number" className="input" disabled={!applyVendorPay} placeholder="Amount paid to vendor now" value={vendorPayAmount} onChange={(e) => setVendorPayAmount(e.target.value)} />
+            </div>
+            <div className="rounded border border-slate-100 p-2 space-y-1">
+              <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyNotes} onChange={(e) => setApplyNotes(e.target.checked)} /> Set Notes</label>
+              <input className="input" disabled={!applyNotes} value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </div>
+          </div>
+
+          {settlePanel}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button disabled={saving} className="btn-primary" onClick={proceed}>{saving ? 'Saving…' : `Apply to ${selectedKeys.length} document(s)`}</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 export default function CasesPage() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
-  const [filters, setFilters] = useState({ q: '', client: '', vendor: '', service: '', status: '', dateFrom: '', dateTo: '', addedBy: '', clientType: '' });
+  const [filters, setFilters] = useState({ q: '', client: '', vendor: '', service: '', status: '', dateFrom: '', dateTo: '', addedBy: '', clientType: '', documentType: '', consultantName: '', idCard: '', mobile: '' });
   const [sortBy, setSortBy] = useState('Date');
   const [sortDir, setSortDir] = useState('desc');
   const [editing, setEditing] = useState(null);
@@ -128,13 +366,22 @@ export default function CasesPage() {
       <div className="card print:hidden">
         <div className="grid grid-cols-6 gap-3">
           <input className="input col-span-2" placeholder="Search everything…" value={filters.q} onChange={(e) => setFilter('q', e.target.value)} />
-          <input className="input" placeholder="Client" value={filters.client} onChange={(e) => setFilter('client', e.target.value)} />
-          <input className="input" placeholder="Vendor" value={filters.vendor} onChange={(e) => setFilter('vendor', e.target.value)} />
+          <input className="input" placeholder="Client Name" value={filters.client} onChange={(e) => setFilter('client', e.target.value)} />
+          <input className="input" placeholder="Vendor Name" value={filters.vendor} onChange={(e) => setFilter('vendor', e.target.value)} />
           <input className="input" placeholder="Service" value={filters.service} onChange={(e) => setFilter('service', e.target.value)} />
           <select className="input" value={filters.status} onChange={(e) => setFilter('status', e.target.value)}>
             <option value="">All statuses</option>
             {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
           </select>
+          {/* PHASE 16 (Part B) — additional search/filters: Document Type,
+              Consultant Name, ID Card Number (CNIC), Mobile Number. These
+              filter server-side over the same getCases() call the rest of
+              this bar already uses, joined against the Clients sheet for
+              ID Card/Mobile since those live on the client record. */}
+          <input className="input" placeholder="Document Type" value={filters.documentType} onChange={(e) => setFilter('documentType', e.target.value)} />
+          <input className="input" placeholder="Consultant Name" value={filters.consultantName} onChange={(e) => setFilter('consultantName', e.target.value)} />
+          <input className="input" placeholder="ID Card Number (CNIC)" value={filters.idCard} onChange={(e) => setFilter('idCard', e.target.value)} />
+          <input className="input" placeholder="Mobile Number" value={filters.mobile} onChange={(e) => setFilter('mobile', e.target.value)} />
           <input type="date" className="input" value={filters.dateFrom} onChange={(e) => setFilter('dateFrom', e.target.value)} />
           <input type="date" className="input" value={filters.dateTo} onChange={(e) => setFilter('dateTo', e.target.value)} />
           <select className="input" value={filters.clientType} onChange={(e) => setFilter('clientType', e.target.value)}>
@@ -193,7 +440,7 @@ export default function CasesPage() {
                     <button className="btn-ghost" onClick={() => setEditing(c)}>Edit</button>
                     {canAdvance && <button className="btn-primary" onClick={() => setAdvancing(c)}>Advance Stage</button>}
                     <button className="btn-secondary" onClick={() => setInvoicing(c)}>Invoice</button>
-                    <button className="btn-secondary" onClick={() => setChangingStatus(c)}>Change Status</button>
+                    <button className="btn-secondary" onClick={() => setChangingStatus(c)}>{c.Services_JSON ? 'Update Documents' : 'Change Status'}</button>
                     <button className="btn-danger" onClick={() => setDeleting(c)}>Delete</button>
                   </div>
                 </td>
@@ -220,17 +467,20 @@ export default function CasesPage() {
 
       {viewing && (
         <Modal title={`Case ${viewing.Case_ID}`} onClose={() => setViewing(null)}>
-          {viewing.Process_Mode === 'process' && viewing.Stages_JSON && (
+          {viewing.Services_JSON && (
+            <ServicesView servicesJson={viewing.Services_JSON} />
+          )}
+          {!viewing.Services_JSON && viewing.Process_Mode === 'process' && viewing.Stages_JSON && (
             <StagesView stagesJson={viewing.Stages_JSON} currentIndex={viewing.Current_Stage_Index} />
           )}
-          {viewing.Case_Mode === 'multiple' && viewing.Boards_JSON && (
+          {!viewing.Services_JSON && viewing.Case_Mode === 'multiple' && viewing.Boards_JSON && (
             <BoardsView boardsJson={viewing.Boards_JSON} />
           )}
-          {viewing.Case_Mode !== 'multiple' && (
+          {!viewing.Services_JSON && viewing.Case_Mode !== 'multiple' && (
             <SingleDocumentsView caseObj={viewing} />
           )}
           <dl className="grid grid-cols-2 gap-3 text-sm mt-4">
-            {Object.entries(viewing).filter(([k]) => k !== 'Deleted' && k !== 'Stages_JSON' && k !== 'Boards_JSON' && k !== 'Documents_JSON').map(([k, v]) => (
+            {Object.entries(viewing).filter(([k]) => k !== 'Deleted' && k !== 'Stages_JSON' && k !== 'Boards_JSON' && k !== 'Documents_JSON' && k !== 'Services_JSON').map(([k, v]) => (
               <div key={k}><dt className="text-slate-400 text-xs">{k}</dt><dd className="font-medium">{String(v)}</dd></div>
             ))}
           </dl>
@@ -249,9 +499,11 @@ export default function CasesPage() {
         <AdvanceStageModal caseObj={advancing} onClose={() => setAdvancing(null)} onDone={() => { setAdvancing(null); load(); }} />
       )}
 
-      {changingStatus && (
+      {changingStatus && (changingStatus.Services_JSON ? (
+        <BulkDocumentModal caseObj={changingStatus} onClose={() => setChangingStatus(null)} onDone={() => { setChangingStatus(null); load(); }} />
+      ) : (
         <ChangeStatusModal caseObj={changingStatus} onClose={() => setChangingStatus(null)} onDone={() => { setChangingStatus(null); load(); }} />
-      )}
+      ))}
     </div>
   );
 }

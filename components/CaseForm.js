@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
 import { getCurrentUser } from '../lib/auth';
+import { downloadBase64File } from '../lib/utils';
 
 const STATUS_OPTIONS = ['New', 'Documents Received', 'Processing', 'Sent to Vendor', 'Pending', 'Completed', 'Returned to Client', 'Cancelled'];
 const EMBASSY_OPTIONS = ['Qatar Embassy', 'Saudi Embassy', 'UAE Embassy', 'Kuwait Embassy', 'Bahrain Embassy', 'Oman Embassy', 'Other'];
@@ -65,6 +66,21 @@ function getCaseDocuments(c) {
   }];
 }
 
+// Backward-compatible reader for a case's services — mirrors
+// getCaseServices() in Code.gs (Phase 16, Part A). Used only for the
+// read-only "editing a services-mode case" summary below; the live add-case
+// flow builds serviceRows state directly, it doesn't need this.
+function getCaseServicesJS(c) {
+  if (!c) return [];
+  if (c.Services_JSON) {
+    try {
+      const parsed = JSON.parse(c.Services_JSON);
+      if (Array.isArray(parsed) && parsed.length) return parsed;
+    } catch { /* fall through */ }
+  }
+  return [];
+}
+
 // Reusable tick-box document picker (Phase 15) — used both for a board's
 // documents (multi-mode) and for a single-mode case's documents. Ticking a
 // document type from the DocumentTypes list (which already includes an
@@ -118,6 +134,65 @@ function DocumentTickList({ docTypes, documents, onToggle, onOtherText, onRateCh
   );
 }
 
+// PHASE 16 (Part A) — a service's tick-box document picker. Like
+// DocumentTickList, but each ticked document ALSO gets its own Vendor
+// picker (a document, even within the same service, can go to a different
+// vendor and be tracked independently — the confirmed core requirement of
+// this phase), on top of its own four rate fields.
+function ServiceDocumentTickList({ docTypes, documents, vendors, onToggle, onOtherText, onFieldChange }) {
+  const otherDoc = documents.find((d) => d.documentType === 'Other');
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-1 rounded bg-white border border-slate-100 p-2 max-h-40 overflow-y-auto">
+        {docTypes.map((dt) => {
+          const checked = documents.some((d) => d.documentType === dt.Name);
+          return (
+            <label key={dt.Type_ID} className="flex items-center gap-1.5 text-xs">
+              <input type="checkbox" checked={checked} onChange={(e) => onToggle(dt.Name, e.target.checked)} />
+              {dt.Category} — {dt.Name}
+            </label>
+          );
+        })}
+      </div>
+      {otherDoc && (
+        <input className="input" placeholder="Type the document name" value={otherDoc.documentTypeOther || ''} onChange={(e) => onOtherText(e.target.value)} />
+      )}
+      {!documents.length && <p className="text-xs text-slate-400">No documents ticked yet.</p>}
+      {documents.map((d, di) => (
+        <div key={di} className="rounded bg-slate-50 border border-slate-100 p-2 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-slate-600">
+              {d.documentType === 'Other' ? (d.documentTypeOther || 'Other') : (d.documentType || '—')}
+            </div>
+            <select className="input !py-1 !text-xs max-w-[10rem]" value={d.vendor} onChange={(e) => onFieldChange(di, { vendor: e.target.value })}>
+              <option value="">This document's vendor</option>
+              {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
+            </select>
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            <div>
+              <label className="label">Vendor Rate</label>
+              <input type="number" className="input" value={d.vendorRate} onChange={(e) => onFieldChange(di, { vendorRate: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Vendor Adj (+/-)</label>
+              <input type="number" className="input" value={d.vendorAdjustment} onChange={(e) => onFieldChange(di, { vendorAdjustment: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Client Rate</label>
+              <input type="number" className="input" value={d.clientRate} onChange={(e) => onFieldChange(di, { clientRate: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Client Adj (+/-)</label>
+              <input type="number" className="input" value={d.clientAdjustment} onChange={(e) => onFieldChange(di, { clientAdjustment: e.target.value })} />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function CaseForm({ initial, onSaved, onCancel }) {
   const isEdit = !!initial?.Case_ID;
   const [clients, setClients] = useState([]);
@@ -132,6 +207,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     Client_Name: '',
     Client_ID: '',
     Client_Type: 'Walk-in',
+    Phone: '',
     Company: '',
     Service: '',
     Vendor: '',
@@ -186,6 +262,23 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     return [];
   });
 
+  // --- PHASE 16 (Part A): the new-case flow — a tick-box list of SERVICES
+  // (Board Verification, IBCC, HEC, MOFA, embassies, National Police
+  // Bureau, plus "Other" free text), each holding one or more TICKED
+  // documents (filtered by DEFAULT_SERVICE_DOCTYPE_MAP), each document
+  // carrying its OWN vendor/status/rates — the confirmed core requirement
+  // that a document, even within the same service, can go to a different
+  // vendor and be tracked independently. This is the ONLY way a brand-new
+  // case is created from now on; editing an existing legacy case still uses
+  // the single-mode / multiple-mode paths below unchanged.
+  const [serviceRows, setServiceRows] = useState([]);
+  const [otherServiceName, setOtherServiceName] = useState('');
+  const [serviceDocTypeMap, setServiceDocTypeMap] = useState({});
+  const [savedCase, setSavedCase] = useState(null); // set once a NEW case has saved — shows "Save Only" / "Save & Download PDF"
+  const [downloadingReceipt, setDownloadingReceipt] = useState(false);
+  const isServicesCase = isEdit && initial?.Case_Mode === 'services' && initial?.Services_JSON;
+  const existingServices = isServicesCase ? getCaseServicesJS(initial) : [];
+
   const [newClientOpen, setNewClientOpen] = useState(false);
   const [newVendorOpen, setNewVendorOpen] = useState(false);
   const [newServiceOpen, setNewServiceOpen] = useState(false);
@@ -196,6 +289,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
       .then(([c, v, s, dt, bt]) => {
         setClients(c); setVendors(v); setServices(s); setDocTypes(dt); setBoardTypes(bt.boards || []);
         if (bt.paymentMethods?.length) setPaymentMethods(bt.paymentMethods);
+        if (bt.serviceDocTypeMap) setServiceDocTypeMap(bt.serviceDocTypeMap);
       }).catch((e) => toast.error(e.message));
   }, []);
 
@@ -213,6 +307,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
       set('Client_ID', c.Client_ID);
       set('Company', c.Company || form.Company);
       set('ID_Card_Number', c.ID_Card_Number || '');
+      set('Phone', c.Phone || form.Phone);
     }
   }
 
@@ -253,23 +348,25 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   // total is now the sum of every TICKED document's client rate, same idea
   // as multi-mode's board/document sum.
   const grossTotal = useMemo(() => {
+    if (!isEdit) return servicesGrossTotal;
     if (isMultiple) {
       return boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0);
     }
     return singleDocuments.reduce((s, d) => s + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0);
-  }, [isMultiple, boardRows, singleDocuments]);
+  }, [isEdit, isMultiple, boardRows, singleDocuments, servicesGrossTotal]);
 
   const singleVendorTotal = useMemo(() => (
     singleDocuments.reduce((s, d) => s + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0)
   ), [singleDocuments]);
 
   const profit = useMemo(() => {
+    if (!isEdit) return servicesGrossTotal - servicesVendorTotal;
     if (isMultiple) {
       const vp = boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0);
       return grossTotal - vp;
     }
     return grossTotal - singleVendorTotal;
-  }, [isMultiple, boardRows, grossTotal, singleVendorTotal]);
+  }, [isEdit, isMultiple, boardRows, grossTotal, singleVendorTotal, servicesGrossTotal, servicesVendorTotal]);
 
   function setBoardRow(idx, patch) {
     setBoardRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -331,6 +428,112 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   function setSingleOtherDocText(text) {
     setSingleDocuments((docs) => docs.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)));
   }
+
+  // --- PHASE 16 (Part A) service tick-box list ---
+  function toggleServiceType(name, checked) {
+    setServiceRows((rows) => (
+      checked ? [...rows, { service: name, isOther: false, urgency: name === 'IBCC' ? 'Normal' : null, documents: [] }]
+        : rows.filter((r) => !(r.service === name && !r.isOther))
+    ));
+  }
+  function toggleOtherService(checked) {
+    if (checked) {
+      setServiceRows((rows) => [...rows, { service: otherServiceName, isOther: true, urgency: null, documents: [] }]);
+    } else {
+      setServiceRows((rows) => rows.filter((r) => !r.isOther));
+      setOtherServiceName('');
+    }
+  }
+  function updateOtherServiceName(name) {
+    setOtherServiceName(name);
+    setServiceRows((rows) => rows.map((r) => (r.isOther ? { ...r, service: name } : r)));
+  }
+  function setServiceUrgency(si, urgency) {
+    setServiceRows((rows) => rows.map((r, i) => (i === si ? { ...r, urgency } : r)));
+  }
+  // A ticked service's document list is filtered by
+  // DEFAULT_SERVICE_DOCTYPE_MAP (fetched from the backend) — e.g. IBCC only
+  // offers Matric/Inter papers, HEC only Bachelor's-onward, everything else
+  // (MOFA, Apostille, any Embassy, National Police Bureau, Board
+  // Verification) accepts any document type. "Other" is always offered too,
+  // same free-text pattern the rest of the app already uses.
+  function allowedDocTypesForService(serviceName) {
+    const mapping = serviceDocTypeMap[serviceName];
+    if (!mapping || mapping.includes('*')) return docTypes;
+    return docTypes.filter((dt) => mapping.includes(dt.Name) || dt.Name === 'Other');
+  }
+  // PHASE 16 (Part B): when a document is freshly ticked, auto-suggest its
+  // Client Rate — from the consultant's own remembered rate (ConsultantRates,
+  // same idea as the legacy single-mode auto-suggest above) when this case
+  // is for a Consultant, otherwise from the new client-side standard rate
+  // table (ClientRates: "Client ki service charges... auto pe utha lo"),
+  // keyed by Service + Document Type. Staff can still edit the field freely
+  // afterwards — this only pre-fills it once, at tick time.
+  function toggleServiceDocument(si, name, checked) {
+    setServiceRows((rows) => rows.map((r, i) => {
+      if (i !== si) return r;
+      if (checked) return { ...r, documents: [...r.documents, emptyDocument(name)] };
+      return { ...r, documents: r.documents.filter((d) => d.documentType !== name) };
+    }));
+    if (!checked) return;
+    const serviceName = serviceRows[si]?.service;
+    if (!serviceName || name === 'Other') return; // "Other" has no fixed name yet to look a rate up by
+    function applyClientRate(rate) {
+      setServiceRows((rows) => rows.map((row, i) => (
+        i === si ? { ...row, documents: row.documents.map((d) => (d.documentType === name ? { ...d, clientRate: rate } : d)) } : row
+      )));
+    }
+    if (isConsultant && form.Client_Name) {
+      api.getConsultantRates({ consultant: form.Client_Name, board: serviceName, documentType: name }).then((rates) => {
+        const r = rates && rates[0];
+        if (r) applyClientRate(Number(r.Rate));
+      }).catch(() => {});
+    } else {
+      api.getClientRates({ service: serviceName, documentType: name }).then((rates) => {
+        const r = rates && rates[0];
+        if (r) applyClientRate(Number(r.Client_Rate));
+      }).catch(() => {});
+    }
+  }
+  function setServiceOtherDocText(si, text) {
+    setServiceRows((rows) => rows.map((r, i) => (
+      i === si ? { ...r, documents: r.documents.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)) } : r
+    )));
+  }
+  // PHASE 16 (Part B): when a specific document's Vendor is picked (or
+  // changed), auto-suggest that vendor's rate for this exact Service +
+  // Document Type pair (ServiceRates is now keyed at that granularity — e.g.
+  // "Ejaz: IBCC Matric" vs "Ejaz: IBCC Inter" are separate rates, no longer
+  // one blended IBCC rate). Only applies when the document already has a
+  // resolved type (a bare "Other" with no free text yet has nothing to key
+  // the lookup by).
+  function setServiceDocumentField(si, di, patch) {
+    setServiceRows((rows) => rows.map((r, i) => (
+      i === si ? { ...r, documents: r.documents.map((d, j) => (j === di ? { ...d, ...patch } : d)) } : r
+    )));
+    if (patch.vendor !== undefined && patch.vendor) {
+      const row = serviceRows[si];
+      const doc = row?.documents[di];
+      const docTypeName = doc ? resolveDocType(doc) : '';
+      if (row?.service && docTypeName) {
+        api.getServiceRates({ service: row.service, vendor: patch.vendor, documentType: docTypeName }).then((rates) => {
+          const r = rates && rates[0];
+          if (r) {
+            setServiceRows((rows2) => rows2.map((rr, i2) => (
+              i2 === si ? { ...rr, documents: rr.documents.map((d2, j2) => (j2 === di ? { ...d2, vendorRate: Number(r.Rate) } : d2)) } : rr
+            )));
+          }
+        }).catch(() => {});
+      }
+    }
+  }
+
+  const servicesGrossTotal = useMemo(() => (
+    serviceRows.reduce((s, r) => s + r.documents.reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0)
+  ), [serviceRows]);
+  const servicesVendorTotal = useMemo(() => (
+    serviceRows.reduce((s, r) => s + r.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0)
+  ), [serviceRows]);
 
   // Resolves one single-mode ticked document's saved Document_Type: "Other"
   // free text (same pattern as resolveDocType) plus, when Service =
@@ -415,85 +618,138 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     }));
   }
 
+  // Required-field validation before submit (confirmed general fix, applied
+  // here for the rebuilt intake form): Client Name, Client Mobile Number, at
+  // least one service ticked with at least one document ticked under it,
+  // Date Received, Expected Return Date. Blocks submission with a clear
+  // inline error (toast) instead of silently saving an incomplete case.
+  function validateNewCase() {
+    if (!form.Client_Name) return 'Client name is required';
+    if (!form.Phone) return 'Client mobile number is required';
+    if (!form.Date) return 'Date received is required';
+    if (!form.Expected_Return_Date) return 'Expected return date is required';
+    if (!serviceRows.length) return 'Tick at least one service';
+    if (serviceRows.some((r) => !r.service.trim())) return 'Every service needs a name';
+    if (!serviceRows.some((r) => r.documents.length)) return 'Tick at least one document under a service';
+    return '';
+  }
+
   async function submit(e) {
     e.preventDefault();
-    if (!form.Client_Name) return toast.error('Client name is required');
-    if (isMultiple && !boardRows.length) return toast.error('Tick at least one board');
-    if (isMultiple && boardRows.some((r) => !r.board.trim())) return toast.error('Every board needs a name');
+    if (!isEdit) {
+      const err = validateNewCase();
+      if (err) return toast.error(err);
+    } else {
+      if (!form.Client_Name) return toast.error('Client name is required');
+      if (isMultiple && !boardRows.length) return toast.error('Tick at least one board');
+      if (isMultiple && boardRows.some((r) => !r.board.trim())) return toast.error('Every board needs a name');
+    }
     setSaving(true);
     try {
       const user = getCurrentUser();
       const payload = { ...form, Added_By: initial?.Added_By || user?.fullName || '' };
 
-      // Keep the client's own ID Card Number / Company in sync with what was
-      // (re)typed on the case form, for an already-existing client.
+      // Keep the client's own ID Card Number / Company / Phone in sync with
+      // what was (re)typed on the case form, for an already-existing client.
       if (form.Client_ID && !isMultiple) {
-        api.updateClient({ Client_ID: form.Client_ID, ID_Card_Number: form.ID_Card_Number, Company: form.Company }).catch(() => {});
+        api.updateClient({ Client_ID: form.Client_ID, ID_Card_Number: form.ID_Card_Number, Company: form.Company, Phone: form.Phone }).catch(() => {});
       }
 
-      if (isEdit) {
-        payload.Profit = profit;
-        if (!isMultiple) {
-          payload.Documents = buildSingleDocumentsPayload();
-          payload.Client_Payment = grossTotal;
-          payload.Vendor_Payment = singleVendorTotal;
-        }
-        await api.updateCase({ ...payload, Case_ID: initial.Case_ID });
-        toast.success('Case updated');
-      } else if (isMultiple) {
-        const Boards = boardRows.map((row) => ({
-          Board_Name: row.board.trim(),
-          Vendor: row.vendor || '',
-          Documents: row.documents.map((d) => ({
+      if (!isEdit) {
+        // PHASE 16 (Part A): every new case is created in the "services"
+        // model — one entry per ticked service, each with its own ticked
+        // documents, each document carrying its own vendor/rates. This is
+        // the ONLY case-creation path from now on; Boards_JSON/
+        // Documents_JSON are never written for new cases.
+        const Services = serviceRows.map((r) => ({
+          Service: r.service.trim(),
+          Urgency: r.service === 'IBCC' ? (r.urgency || 'Normal') : null,
+          Documents: r.documents.map((d) => ({
             Document_Type: resolveDocType(d),
+            Vendor: d.vendor || '',
             Vendor_Rate: Number(d.vendorRate) || 0,
             Vendor_Adjustment: Number(d.vendorAdjustment) || 0,
             Client_Rate: Number(d.clientRate) || 0,
             Client_Adjustment: Number(d.clientAdjustment) || 0,
           })),
         }));
-        await api.addCase({ ...payload, Case_Mode: 'multiple', Boards, Client_Payment: grossTotal });
-        // Remember any edited rates for next time (points 5 & 6) — based on
-        // each board's first document, same simplification as the rate
-        // auto-suggest above.
-        Boards.forEach((b) => {
-          const firstDoc = b.Documents[0];
-          if (!firstDoc) return;
-          if (isConsultant && b.Vendor) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: b.Board_Name, Rate: firstDoc.Client_Rate }).catch(() => {});
-          if (b.Vendor) api.upsertServiceRate({ Vendor_Name: b.Vendor, Service_Name: b.Board_Name, Rate: firstDoc.Vendor_Rate }).catch(() => {});
-        });
-        toast.success(`Case added — ${Boards.length} board(s)`);
-      } else {
-        const Documents = buildSingleDocumentsPayload();
-        payload.Profit = profit;
-        payload.Case_Mode = 'single';
-        payload.Documents = Documents;
-        payload.Client_Payment = grossTotal;
-        payload.Vendor_Payment = singleVendorTotal;
-        await api.addCase(payload);
+        payload.Profit = servicesGrossTotal - servicesVendorTotal;
+        const saved = await api.addCase({ ...payload, Case_Mode: 'services', Services, Client_Payment: servicesGrossTotal, Vendor_Payment: servicesVendorTotal });
         // Remember any edited rates for next time, per ticked document —
-        // same idea as the board rate-remembering above, keyed by document
-        // type instead of board name.
-        Documents.forEach((d) => {
-          const key = d.Document_Type || form.Service;
-          if (!key) return;
-          if (isConsultant && form.Client_Name) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: key, Rate: d.Client_Rate }).catch(() => {});
-          else if (form.Vendor) api.upsertServiceRate({ Vendor_Name: form.Vendor, Service_Name: key, Rate: d.Vendor_Rate }).catch(() => {});
+        // same idea as the legacy per-board/per-document rate-remembering.
+        Services.forEach((sv) => {
+          sv.Documents.forEach((d) => {
+            const key = d.Document_Type || sv.Service;
+            if (!key) return;
+            if (isConsultant && form.Client_Name) api.upsertConsultantRate({ Consultant_Name: form.Client_Name, Board_Name: key, Rate: d.Client_Rate }).catch(() => {});
+            else if (d.Vendor) api.upsertServiceRate({ Vendor_Name: d.Vendor, Service_Name: key, Rate: d.Vendor_Rate }).catch(() => {});
+          });
         });
-        toast.success('Case added');
+        toast.success(`Case ${saved.Case_ID} saved — ${Services.length} service(s)`);
+        setSavedCase(saved);
+        setSaving(false);
+        return;
       }
+
+      if (isEdit) {
+        payload.Profit = profit;
+        // A services-mode case's documents/status/vendor are edited from
+        // the Cases list's bulk update panel, not this form (mirrors how a
+        // legacy "multiple" case's boards are edited via Change Status) —
+        // don't touch Services_JSON/Documents_JSON here, only the shared
+        // case-level fields below.
+        if (!isMultiple && !isServicesCase) {
+          payload.Documents = buildSingleDocumentsPayload();
+          payload.Client_Payment = grossTotal;
+          payload.Vendor_Payment = singleVendorTotal;
+        }
+        await api.updateCase({ ...payload, Case_ID: initial.Case_ID });
+        toast.success('Case updated');
+      }
+      // (New-case creation always returns early above, in the services
+      // branch — this point is only reached when editing.)
       onSaved && onSaved();
     } catch (e) { toast.error(e.message); } finally { setSaving(false); }
+  }
+
+  // PHASE 16 (Part A): after a brand-new case saves, offer an explicit
+  // choice instead of just closing — "Save Only" (current behavior) or
+  // "Save & Download PDF" (a receipt, via the same PDF mechanism the
+  // invoice system already uses).
+  async function downloadReceipt() {
+    setDownloadingReceipt(true);
+    try {
+      const r = await api.getReceiptPdf(savedCase.Case_ID);
+      downloadBase64File(r.filename, r.base64, 'application/pdf');
+    } catch (e) { toast.error(e.message); } finally {
+      setDownloadingReceipt(false);
+      onSaved && onSaved();
+    }
+  }
+
+  if (savedCase) {
+    return (
+      <div className="space-y-4">
+        <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-4 space-y-1">
+          <div className="text-sm font-semibold text-emerald-800">Case {savedCase.Case_ID} saved.</div>
+          <p className="text-xs text-emerald-700">Save the receipt now, or just close — you can print a receipt/invoice anytime from the Cases list.</p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={() => onSaved && onSaved()}>Save Only</button>
+          <button type="button" disabled={downloadingReceipt} className="btn-primary" onClick={downloadReceipt}>{downloadingReceipt ? 'Preparing…' : 'Save & Download PDF'}</button>
+        </div>
+      </div>
+    );
   }
 
   return (
     <form onSubmit={submit} className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="label">Date</label>
+          <label className="label">Date Received</label>
           <input type="date" className="input" value={form.Date} onChange={(e) => set('Date', e.target.value)} required />
         </div>
-        {!isMultiple && (
+        {!isMultiple && isEdit && !isServicesCase && (
           <div>
             <label className="label">Document Status</label>
             <select className="input" value={form.Document_Status} onChange={(e) => set('Document_Status', e.target.value)}>
@@ -512,15 +768,10 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
             <option value="Consultant">Consultant</option>
           </select>
         </div>
-        {!isEdit && (
-          <div>
-            <label className="label">Single Case or Multiple Boards?</label>
-            <select className="input" value={form.Case_Mode} onChange={(e) => set('Case_Mode', e.target.value)}>
-              <option value="single">Single</option>
-              <option value="multiple">Multiple (IBCC / HEC / MOFA / Embassy…)</option>
-            </select>
-          </div>
-        )}
+        <div>
+          <label className="label">Client Mobile Number</label>
+          <input className="input" value={form.Phone || ''} onChange={(e) => set('Phone', e.target.value)} placeholder="03xx-xxxxxxx" required={!isEdit} />
+        </div>
       </div>
 
       {/* Point 5: Consultant list, or free-type walk-in client name */}
@@ -562,8 +813,8 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         </div>
       )}
 
-      {/* --- SINGLE mode: point 8, works as before, simplified (no multi-step process UI) --- */}
-      {!isMultiple && (
+      {/* --- Legacy SINGLE-mode case, editing only: works as before --- */}
+      {!isMultiple && isEdit && !isServicesCase && (
         <>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -655,10 +906,100 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         </div>
       )}
 
-      {/* --- MULTIPLE mode (Phase 15): boards are TICKED from the fixed
-          BOARD_TYPES list (+ Other) instead of typed one at a time; each
-          ticked board's documents are, in turn, TICKED from the
-          DocumentTypes list (+ Other), each with its own rate row. --- */}
+      {/* PHASE 16 (Part A): editing a services-mode case shows a read-only
+          breakdown — bulk edits (status/vendor/dates/payment, across
+          services) happen from the Cases list's bulk update panel, not
+          here, mirroring how a legacy "multiple" case's boards work. */}
+      {isServicesCase && (
+        <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
+          <div className="text-xs font-semibold text-slate-500 uppercase">Services on this case (use the Cases list to update status/vendor)</div>
+          {existingServices.map((sv) => (
+            <div key={sv.serviceId} className="rounded bg-white border border-slate-100 px-2 py-1.5 text-sm space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">{sv.service}{sv.urgency ? ` (${sv.urgency})` : ''}</span>
+              </div>
+              {(sv.documents || []).map((d) => (
+                <div key={d.docId} className="text-xs text-slate-500 pl-2 flex items-center justify-between">
+                  <span>{d.documentType || '—'} — {d.vendor || 'no vendor'} — <span className="font-medium">{d.status}</span></span>
+                  <span>Vendor {Number(d.vendorRate) + Number(d.vendorAdjustment)} / Client {Number(d.clientRate) + Number(d.clientAdjustment)}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* PHASE 16 (Part A) — the new intake flow for every brand-new case.
+          A client declares ALL the services their case needs up front,
+          ticked from the fixed BOARD_TYPES list (+ "Other" free text) —
+          Board Verification, IBCC, HEC, MOFA, Apostille, embassies,
+          National Police Bureau. Each ticked service reveals its own
+          document tick-list, filtered by DEFAULT_SERVICE_DOCTYPE_MAP (e.g.
+          IBCC only offers Matric/Inter). Each ticked document gets its own
+          Vendor + four rate fields — a document, even within the same
+          service, can go to a different vendor and is tracked
+          independently. IBCC gets one Normal/Urgent selector per
+          service-entry (not per document). */}
+      {!isEdit && (
+        <div className="space-y-3">
+          <label className="label mb-0">Services this case needs (tick all that apply — the full chain, if known up front)</label>
+          <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-50 border border-slate-100 p-3">
+            {boardTypes.map((bt) => {
+              const checked = serviceRows.some((r) => r.service === bt && !r.isOther);
+              return (
+                <label key={bt} className="flex items-center gap-1.5 text-sm">
+                  <input type="checkbox" checked={checked} onChange={(e) => toggleServiceType(bt, e.target.checked)} />
+                  {bt}
+                </label>
+              );
+            })}
+            <label className="flex items-center gap-1.5 text-sm">
+              <input type="checkbox" checked={serviceRows.some((r) => r.isOther)} onChange={(e) => toggleOtherService(e.target.checked)} />
+              Other
+            </label>
+          </div>
+          {serviceRows.some((r) => r.isOther) && (
+            <input className="input" placeholder="Type a service name" value={otherServiceName} onChange={(e) => updateOtherServiceName(e.target.value)} />
+          )}
+
+          {!serviceRows.length && <p className="text-xs text-slate-400">No services ticked yet — tick one above to start (e.g. Board Verification, IBCC, HEC, MOFA, UAE Embassy…).</p>}
+
+          {serviceRows.map((row, si) => (
+            <div key={si} className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-semibold text-sm">{row.service || '(untitled service)'}</div>
+                {row.service === 'IBCC' && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="flex items-center gap-1">
+                      <input type="radio" name={`urgency-${si}`} checked={row.urgency !== 'Urgent'} onChange={() => setServiceUrgency(si, 'Normal')} /> Normal
+                    </label>
+                    <label className="flex items-center gap-1">
+                      <input type="radio" name={`urgency-${si}`} checked={row.urgency === 'Urgent'} onChange={() => setServiceUrgency(si, 'Urgent')} /> Urgent
+                    </label>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-500 uppercase">Documents for this service (tick all that apply — each gets its own vendor)</div>
+                <ServiceDocumentTickList
+                  docTypes={allowedDocTypesForService(row.service)}
+                  documents={row.documents}
+                  vendors={vendors}
+                  onToggle={(name, checked) => toggleServiceDocument(si, name, checked)}
+                  onOtherText={(text) => setServiceOtherDocText(si, text)}
+                  onFieldChange={(di, patch) => setServiceDocumentField(si, di, patch)}
+                />
+              </div>
+            </div>
+          ))}
+          <p className="text-xs text-slate-400">Each document starts at status "Document Received" and is tracked independently — set its vendor/status/dates later from the Cases list (bulk actions work across services too).</p>
+        </div>
+      )}
+
+      {/* --- Legacy MULTIPLE-board mode: kept for reference only, no longer
+          reachable for a new case (the intake flow above replaces it), but
+          the code stays in case an old draft/bookmark still points here. --- */}
       {isMultiple && !isEdit && (
         <div className="space-y-3">
           <label className="label mb-0">Boards / Services (tick all that apply)</label>

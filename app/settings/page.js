@@ -34,11 +34,34 @@ export default function SettingsPage() {
   const [editingDocType, setEditingDocType] = useState(null);
   const [boardTypes, setBoardTypes] = useState([]);
 
+  // PHASE 16 (Part B) — Service -> Document Type access mapping (editable)
+  const [svcDocMap, setSvcDocMap] = useState({}); // serviceName -> { unrestricted, allowed: [names] }
+  const [savingDocMap, setSavingDocMap] = useState(false);
+
+  // PHASE 16 (Part B) — client-side standard rate table
+  const [clientRates, setClientRates] = useState([]);
+  const [editingClientRate, setEditingClientRate] = useState(null);
+  const [deletingClientRate, setDeletingClientRate] = useState(null);
+
+  // PHASE 16 (Part B) — daily analytics report (to Azhar)
+  const [dailyReportEmail, setDailyReportEmail] = useState('');
+  const [sendingReport, setSendingReport] = useState(false);
+
   function load() {
     api.getServices().then(setServices).catch((e) => toast.error(e.message));
     api.getConsultantRates().then(setConsultantRates).catch(() => {});
     api.getDocumentTypes().then(setDocTypes).catch(() => {});
     api.getBoardTypes().then((o) => setBoardTypes(o.boards || [])).catch(() => {});
+    api.getServiceDocTypeMap().then((o) => {
+      const raw = o.map || {};
+      const editable = {};
+      Object.keys(raw).forEach((svc) => {
+        const arr = raw[svc] || [];
+        editable[svc] = { unrestricted: arr.includes('*'), allowed: arr.filter((a) => a !== '*') };
+      });
+      setSvcDocMap(editable);
+    }).catch(() => {});
+    api.getClientRates().then(setClientRates).catch(() => {});
     api.getSettings().then((s) => {
       setSettings(s);
       setCompanyName(s.company_name || '');
@@ -49,6 +72,7 @@ export default function SettingsPage() {
       setCompanyEmail(s.company_email || '');
       setCompanyLogoBase64(s.company_logo_base64 || '');
       setDailySummaryEmail(s.daily_summary_email || '');
+      setDailyReportEmail(s.daily_report_email || '');
     }).catch((e) => toast.error(e.message));
     api.getUsers().then(setTeamUsers).catch(() => {});
     api.getServiceRates().then(setRates).catch(() => {});
@@ -63,6 +87,39 @@ export default function SettingsPage() {
       if (r.sent) toast.success(`Sent to ${r.to} (${r.count} entries today)`);
       else toast.error(r.reason || 'Could not send — set an email first');
     } catch (e) { toast.error(e.message); } finally { setSendingSummary(false); }
+  }
+
+  async function sendReportNow() {
+    setSendingReport(true);
+    try {
+      const r = await api.sendDailySummaryReportNow();
+      if (r.sent) toast.success(`Sent to ${r.to}`);
+      else toast.error(r.reason || 'Could not send — set an email first');
+    } catch (e) { toast.error(e.message); } finally { setSendingReport(false); }
+  }
+
+  // PHASE 16 (Part B) — Service -> Document Type mapping editing
+  function toggleUnrestricted(svc, val) {
+    setSvcDocMap((m) => ({ ...m, [svc]: { unrestricted: val, allowed: m[svc]?.allowed || [] } }));
+  }
+  function toggleAllowedDoc(svc, name, checked) {
+    setSvcDocMap((m) => {
+      const cur = m[svc] || { unrestricted: false, allowed: [] };
+      const allowed = checked ? [...cur.allowed, name] : cur.allowed.filter((n) => n !== name);
+      return { ...m, [svc]: { ...cur, allowed } };
+    });
+  }
+  async function saveDocTypeMap() {
+    setSavingDocMap(true);
+    try {
+      await api.updateServiceDocTypeMap({ map: svcDocMap });
+      toast.success('Service → Document Type mapping saved');
+    } catch (e) { toast.error(e.message); } finally { setSavingDocMap(false); }
+  }
+
+  async function doDeleteClientRate() {
+    try { await api.deleteClientRate(deletingClientRate.Rate_ID); toast.success('Rate removed'); setDeletingClientRate(null); load(); }
+    catch (e) { toast.error(e.message); }
   }
 
   async function runOverdueCheck() {
@@ -85,7 +142,7 @@ export default function SettingsPage() {
 
   async function saveSettings() {
     try {
-      await api.updateSettings({ company_name: companyName, currency, frontend_url: frontendUrl, company_address: companyAddress, company_phone: companyPhone, company_email: companyEmail, daily_summary_email: dailySummaryEmail });
+      await api.updateSettings({ company_name: companyName, currency, frontend_url: frontendUrl, company_address: companyAddress, company_phone: companyPhone, company_email: companyEmail, daily_summary_email: dailySummaryEmail, daily_report_email: dailyReportEmail });
       toast.success('Settings saved');
     }
     catch (e) { toast.error(e.message); }
@@ -190,6 +247,59 @@ export default function SettingsPage() {
       </div>
 
       <div className="card space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-700">Daily Analytics Report (to Azhar)</h3>
+          <p className="text-xs text-slate-400 mt-1">Once a day (~6pm, after the one-time trigger setup below), this email gets the full snapshot in ONE message: active / completed-today / completed-this-month / on-hold counts, a by-service breakdown, a by-document-type breakdown, and a per-staff summary.</p>
+        </div>
+        <div>
+          <label className="label">Send Daily Report To</label>
+          <input type="email" className="input max-w-sm" placeholder="azhar@example.com" value={dailyReportEmail} onChange={(e) => setDailyReportEmail(e.target.value)} />
+          <p className="text-xs text-slate-400 mt-1">Leave blank to fall back to the Daily Summary email above, then the Company Email, then whichever team member has the "admin" role and an email on file.</p>
+        </div>
+        <div className="flex gap-2">
+          <button className="btn-primary" onClick={saveSettings}>Save Email</button>
+          <button className="btn-secondary" disabled={sendingReport} onClick={sendReportNow}>{sendingReport ? 'Sending…' : 'Send Test Report Now'}</button>
+        </div>
+        <p className="text-xs text-slate-400">One-time setup for the automatic daily send: open the Apps Script editor → select <code>createDailyReportTrigger</code> from the function dropdown → Run → approve permissions if prompted. See README for details.</p>
+      </div>
+
+      <div className="card space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-700">Service → Document Type Access</h3>
+          <p className="text-xs text-slate-400 mt-1">Controls which document types show up under each service when a case is created (e.g. IBCC only offers Matric/Inter papers). Toggle "Unrestricted" to allow every document type under a service.</p>
+        </div>
+        <div className="space-y-3">
+          {boardTypes.map((svc) => {
+            const entry = svcDocMap[svc] || { unrestricted: true, allowed: [] };
+            return (
+              <div key={svc} className="rounded border border-slate-100 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium text-sm">{svc}</span>
+                  <label className="flex items-center gap-1.5 text-xs">
+                    <input type="checkbox" checked={entry.unrestricted} onChange={(e) => toggleUnrestricted(svc, e.target.checked)} />
+                    Unrestricted (allow all)
+                  </label>
+                </div>
+                {!entry.unrestricted && (
+                  <div className="grid grid-cols-3 gap-1">
+                    {docTypes.map((dt) => (
+                      <label key={dt.Type_ID} className="flex items-center gap-1.5 text-xs">
+                        <input type="checkbox" checked={entry.allowed.includes(dt.Name)} onChange={(e) => toggleAllowedDoc(svc, dt.Name, e.target.checked)} />
+                        {dt.Name}
+                      </label>
+                    ))}
+                    {!docTypes.length && <span className="text-xs text-slate-400">Add document types below first.</span>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {!boardTypes.length && <p className="text-xs text-slate-400">Loading services…</p>}
+        </div>
+        <button className="btn-primary" disabled={savingDocMap} onClick={saveDocTypeMap}>{savingDocMap ? 'Saving…' : 'Save Mapping'}</button>
+      </div>
+
+      <div className="card space-y-4">
         <h3 className="font-semibold text-slate-700">Team & Login</h3>
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
@@ -253,12 +363,13 @@ export default function SettingsPage() {
         </div>
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
-            {['Service', 'Vendor', 'Rate', 'Turnaround (days)', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+            {['Service', 'Document Type', 'Vendor', 'Rate', 'TAT', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
           </tr></thead>
           <tbody>
             {rates.map((r) => (
               <tr key={r.Rate_ID} className="border-b border-slate-50">
                 <td className="td font-medium">{r.Service_Name}</td>
+                <td className="td">{r.Document_Type || <span className="text-slate-400">any</span>}</td>
                 <td className="td">{r.Vendor_Name}</td>
                 <td className="td">{r.Rate}</td>
                 <td className="td">{r.Turnaround_Days || '-'}</td>
@@ -270,7 +381,7 @@ export default function SettingsPage() {
                 </td>
               </tr>
             ))}
-            {!rates.length && <tr><td colSpan={5} className="td text-center text-slate-400 py-6">No rates yet</td></tr>}
+            {!rates.length && <tr><td colSpan={6} className="td text-center text-slate-400 py-6">No rates yet</td></tr>}
           </tbody>
         </table>
       </div>
@@ -285,14 +396,16 @@ export default function SettingsPage() {
         </div>
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
-            {['Consultant', 'Board / Service', 'Rate', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+            {['Consultant', 'Board / Service', 'Document Type', 'Rate', 'TAT', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
           </tr></thead>
           <tbody>
             {consultantRates.map((r) => (
               <tr key={r.Rate_ID} className="border-b border-slate-50">
                 <td className="td font-medium">{r.Consultant_Name}</td>
                 <td className="td">{r.Board_Name}</td>
+                <td className="td">{r.Document_Type || <span className="text-slate-400">any</span>}</td>
                 <td className="td">{r.Rate}</td>
+                <td className="td">{r.Turnaround_Days || '-'}</td>
                 <td className="td">
                   <div className="flex gap-2">
                     <button className="btn-ghost" onClick={() => setEditingConsultantRate(r)}>Edit</button>
@@ -301,7 +414,38 @@ export default function SettingsPage() {
                 </td>
               </tr>
             ))}
-            {!consultantRates.length && <tr><td colSpan={4} className="td text-center text-slate-400 py-6">No consultant rates yet</td></tr>}
+            {!consultantRates.length && <tr><td colSpan={6} className="td text-center text-slate-400 py-6">No consultant rates yet</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="font-semibold text-slate-700">Client Standard Rates</h3>
+            <p className="text-xs text-slate-400 mt-1">Default price charged to the client per Service + Document Type — auto-fills the Client Rate at intake (staff can still override per case/document). "Client ki service charges... auto pe utha lo."</p>
+          </div>
+          <button className="btn-primary" onClick={() => setEditingClientRate('new')}>➕ Add Rate</button>
+        </div>
+        <table className="w-full">
+          <thead><tr className="border-b border-slate-100">
+            {['Service', 'Document Type', 'Client Rate', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {clientRates.map((r) => (
+              <tr key={r.Rate_ID} className="border-b border-slate-50">
+                <td className="td font-medium">{r.Service}</td>
+                <td className="td">{r.Document_Type}</td>
+                <td className="td">{r.Client_Rate}</td>
+                <td className="td">
+                  <div className="flex gap-2">
+                    <button className="btn-ghost" onClick={() => setEditingClientRate(r)}>Edit</button>
+                    <button className="btn-danger" onClick={() => setDeletingClientRate(r)}>Delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!clientRates.length && <tr><td colSpan={4} className="td text-center text-slate-400 py-6">No client rates yet</td></tr>}
           </tbody>
         </table>
       </div>
@@ -347,17 +491,24 @@ export default function SettingsPage() {
 
       {editingRate && (
         <Modal title={editingRate === 'new' ? 'Add Service Rate' : 'Edit Service Rate'} onClose={() => setEditingRate(null)}>
-          <ServiceRateForm initial={editingRate === 'new' ? undefined : editingRate} services={services} onSaved={() => { setEditingRate(null); load(); }} onCancel={() => setEditingRate(null)} />
+          <ServiceRateForm initial={editingRate === 'new' ? undefined : editingRate} services={services} docTypes={docTypes} onSaved={() => { setEditingRate(null); load(); }} onCancel={() => setEditingRate(null)} />
         </Modal>
       )}
       {deletingRate && <ConfirmModal message={`Remove rate for "${deletingRate.Service_Name}" / "${deletingRate.Vendor_Name}"?`} onCancel={() => setDeletingRate(null)} onConfirm={doDeleteRate} />}
 
       {editingConsultantRate && (
         <Modal title={editingConsultantRate === 'new' ? 'Add Consultant Rate' : 'Edit Consultant Rate'} onClose={() => setEditingConsultantRate(null)}>
-          <ConsultantRateForm initial={editingConsultantRate === 'new' ? undefined : editingConsultantRate} boardTypes={boardTypes} services={services} onSaved={() => { setEditingConsultantRate(null); load(); }} onCancel={() => setEditingConsultantRate(null)} />
+          <ConsultantRateForm initial={editingConsultantRate === 'new' ? undefined : editingConsultantRate} boardTypes={boardTypes} services={services} docTypes={docTypes} onSaved={() => { setEditingConsultantRate(null); load(); }} onCancel={() => setEditingConsultantRate(null)} />
         </Modal>
       )}
       {deletingConsultantRate && <ConfirmModal message={`Remove rate for "${deletingConsultantRate.Consultant_Name}" / "${deletingConsultantRate.Board_Name}"?`} onCancel={() => setDeletingConsultantRate(null)} onConfirm={doDeleteConsultantRate} />}
+
+      {editingClientRate && (
+        <Modal title={editingClientRate === 'new' ? 'Add Client Rate' : 'Edit Client Rate'} onClose={() => setEditingClientRate(null)}>
+          <ClientRateForm initial={editingClientRate === 'new' ? undefined : editingClientRate} boardTypes={boardTypes} services={services} docTypes={docTypes} onSaved={() => { setEditingClientRate(null); load(); }} onCancel={() => setEditingClientRate(null)} />
+        </Modal>
+      )}
+      {deletingClientRate && <ConfirmModal message={`Remove client rate for "${deletingClientRate.Service}" / "${deletingClientRate.Document_Type}"?`} onCancel={() => setDeletingClientRate(null)} onConfirm={doDeleteClientRate} />}
 
       {editingDocType && (
         <Modal title={editingDocType === 'new' ? 'Add Document Type' : 'Edit Document Type'} onClose={() => setEditingDocType(null)}>
@@ -464,9 +615,9 @@ function ServiceForm({ initial, onSaved, onCancel }) {
   );
 }
 
-function ConsultantRateForm({ initial, boardTypes, services, onSaved, onCancel }) {
+function ConsultantRateForm({ initial, boardTypes, services, docTypes, onSaved, onCancel }) {
   const [consultants, setConsultants] = useState([]);
-  const [form, setForm] = useState({ Consultant_Name: '', Board_Name: '', Rate: '', ...initial });
+  const [form, setForm] = useState({ Consultant_Name: '', Board_Name: '', Document_Type: '', Rate: '', Turnaround_Days: '', ...initial });
   const [saving, setSaving] = useState(false);
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
   const options = [...(boardTypes || []), ...services.map((s) => s.Service_Name)];
@@ -476,6 +627,8 @@ function ConsultantRateForm({ initial, boardTypes, services, onSaved, onCancel }
   async function submit(e) {
     e.preventDefault();
     if (!form.Consultant_Name || !form.Board_Name) return toast.error('Consultant and Board/Service are required');
+    if (!form.Document_Type) return toast.error('Document Type is required — e.g. "IBCC Matric" vs "IBCC Inter" are separate rates');
+    if (!String(form.Turnaround_Days || '').trim()) return toast.error('Turnaround Time (TAT) is required');
     setSaving(true);
     try {
       if (initial?.Rate_ID) await api.updateConsultantRate(form);
@@ -504,8 +657,70 @@ function ConsultantRateForm({ initial, boardTypes, services, onSaved, onCancel }
         </div>
       </div>
       <div>
-        <label className="label">Rate</label>
-        <input type="number" className="input" value={form.Rate} onChange={(e) => set('Rate', e.target.value)} required />
+        <label className="label">Document Type</label>
+        <select className="input" value={form.Document_Type} onChange={(e) => set('Document_Type', e.target.value)} required>
+          <option value="">Select document type</option>
+          {docTypes.map((d) => <option key={d.Type_ID} value={d.Name}>{d.Name}</option>)}
+        </select>
+        <p className="text-xs text-slate-400 mt-1">A rate is keyed by Board/Service + Document Type, so "IBCC Matric" and "IBCC Inter" can have different rates.</p>
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="label">Rate</label>
+          <input type="number" className="input" value={form.Rate} onChange={(e) => set('Rate', e.target.value)} required />
+        </div>
+        <div>
+          <label className="label">Turnaround Time (TAT)</label>
+          <input className="input" placeholder="e.g. 3-4 days" value={form.Turnaround_Days} onChange={(e) => set('Turnaround_Days', e.target.value)} required />
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 pt-2">
+        <button type="button" className="btn-secondary" onClick={onCancel}>Cancel</button>
+        <button disabled={saving} className="btn-primary">{saving ? 'Saving…' : 'Save'}</button>
+      </div>
+    </form>
+  );
+}
+
+function ClientRateForm({ initial, boardTypes, services, docTypes, onSaved, onCancel }) {
+  const [form, setForm] = useState({ Service: '', Document_Type: '', Client_Rate: '', ...initial });
+  const [saving, setSaving] = useState(false);
+  function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
+  const options = [...(boardTypes || []), ...services.map((s) => s.Service_Name)];
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!form.Service || !form.Document_Type) return toast.error('Service and Document Type are required');
+    setSaving(true);
+    try {
+      if (initial?.Rate_ID) await api.updateClientRate(form);
+      else await api.addClientRate(form);
+      toast.success('Saved');
+      onSaved();
+    } catch (e) { toast.error(e.message); } finally { setSaving(false); }
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="label">Service</label>
+          <select className="input" value={form.Service} onChange={(e) => set('Service', e.target.value)} required>
+            <option value="">Select service</option>
+            {options.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="label">Document Type</label>
+          <select className="input" value={form.Document_Type} onChange={(e) => set('Document_Type', e.target.value)} required>
+            <option value="">Select document type</option>
+            {docTypes.map((d) => <option key={d.Type_ID} value={d.Name}>{d.Name}</option>)}
+          </select>
+        </div>
+      </div>
+      <div>
+        <label className="label">Client Rate (standard price)</label>
+        <input type="number" className="input" value={form.Client_Rate} onChange={(e) => set('Client_Rate', e.target.value)} required />
       </div>
       <div className="flex justify-end gap-2 pt-2">
         <button type="button" className="btn-secondary" onClick={onCancel}>Cancel</button>
@@ -555,9 +770,9 @@ function DocumentTypeForm({ initial, onSaved, onCancel }) {
   );
 }
 
-function ServiceRateForm({ initial, services, onSaved, onCancel }) {
+function ServiceRateForm({ initial, services, docTypes, onSaved, onCancel }) {
   const [vendors, setVendors] = useState([]);
-  const [form, setForm] = useState({ Service_Name: '', Vendor_Name: '', Rate: '', Turnaround_Days: '', ...initial });
+  const [form, setForm] = useState({ Service_Name: '', Vendor_Name: '', Document_Type: '', Rate: '', Turnaround_Days: '', ...initial });
   const [saving, setSaving] = useState(false);
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
 
@@ -566,6 +781,8 @@ function ServiceRateForm({ initial, services, onSaved, onCancel }) {
   async function submit(e) {
     e.preventDefault();
     if (!form.Service_Name || !form.Vendor_Name) return toast.error('Service and Vendor are required');
+    if (!form.Document_Type) return toast.error('Document Type is required — e.g. "IBCC Matric" vs "IBCC Inter" are separate rates');
+    if (!String(form.Turnaround_Days || '').trim()) return toast.error('Turnaround Time (TAT) is required');
     setSaving(true);
     try {
       if (initial?.Rate_ID) await api.updateServiceRate(form);
@@ -593,14 +810,22 @@ function ServiceRateForm({ initial, services, onSaved, onCancel }) {
           </select>
         </div>
       </div>
+      <div>
+        <label className="label">Document Type</label>
+        <select className="input" value={form.Document_Type} onChange={(e) => set('Document_Type', e.target.value)} required>
+          <option value="">Select document type</option>
+          {docTypes.map((d) => <option key={d.Type_ID} value={d.Name}>{d.Name}</option>)}
+        </select>
+        <p className="text-xs text-slate-400 mt-1">A rate is keyed by Vendor + Service + Document Type, so "Ejaz: IBCC Matric" and "Ejaz: IBCC Inter" can have different rates.</p>
+      </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="label">Rate</label>
           <input type="number" className="input" value={form.Rate} onChange={(e) => set('Rate', e.target.value)} required />
         </div>
         <div>
-          <label className="label">Turnaround (days)</label>
-          <input type="number" className="input" value={form.Turnaround_Days} onChange={(e) => set('Turnaround_Days', e.target.value)} />
+          <label className="label">Turnaround Time (TAT)</label>
+          <input className="input" placeholder="e.g. 3-4 days" value={form.Turnaround_Days} onChange={(e) => set('Turnaround_Days', e.target.value)} required />
         </div>
       </div>
       <div className="flex justify-end gap-2 pt-2">

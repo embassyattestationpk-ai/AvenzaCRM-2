@@ -43,21 +43,22 @@ export default function VendorProfilePage() {
       </div>
 
       <div className="card">
-        <h3 className="font-semibold text-slate-700 mb-4">Rates by Service / Board (with Turnaround Time)</h3>
+        <h3 className="font-semibold text-slate-700 mb-4">Rates by Service / Board + Document Type (with Turnaround Time)</h3>
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead><tr className="border-b border-slate-100">
-              {['Service / Board', 'Rate', 'TAT (days)'].map((h) => <th key={h} className="th">{h}</th>)}
+              {['Service / Board', 'Document Type', 'Rate', 'TAT'].map((h) => <th key={h} className="th">{h}</th>)}
             </tr></thead>
             <tbody>
               {rates.map((r) => (
                 <tr key={r.Rate_ID} className="border-b border-slate-50">
                   <td className="td font-medium">{r.Service_Name}</td>
+                  <td className="td">{r.Document_Type || <span className="text-slate-400">any</span>}</td>
                   <td className="td">{money(r.Rate)}</td>
                   <td className="td">{r.Turnaround_Days || '-'}</td>
                 </tr>
               ))}
-              {!rates.length && <tr><td colSpan={3} className="td text-center text-slate-400 py-6">No rates set yet — add them from Settings → Service Rates</td></tr>}
+              {!rates.length && <tr><td colSpan={4} className="td text-center text-slate-400 py-6">No rates set yet — add them from Settings → Service Rates</td></tr>}
             </tbody>
           </table>
         </div>

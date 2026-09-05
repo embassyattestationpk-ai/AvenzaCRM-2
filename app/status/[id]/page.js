@@ -64,6 +64,23 @@ export default function PublicStatusPage() {
                 </div>
               )}
 
+              {data.Services && data.Services.length > 0 && (
+                <div className="border-t border-slate-100 pt-4 mt-2">
+                  <div className="text-xs font-semibold text-slate-500 uppercase mb-2">Progress by Service</div>
+                  <div className="space-y-1.5">
+                    {data.Services.map((sv, i) => (
+                      <div key={i} className={`flex items-center justify-between text-sm px-2 py-1.5 rounded ${sv.status === 'Completed' ? 'bg-emerald-50' : sv.status === 'In Process' ? 'bg-amber-50' : 'bg-slate-50'}`}>
+                        <div>
+                          <div className="font-medium">{sv.name}</div>
+                          {sv.documentType && <div className="text-xs text-slate-400">{sv.documentType}</div>}
+                        </div>
+                        <span className={`badge ${statusColor(sv.status)}`}>{sv.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {data.Boards && data.Boards.length > 0 && (
                 <div className="border-t border-slate-100 pt-4 mt-2">
                   <div className="text-xs font-semibold text-slate-500 uppercase mb-2">Documents / Boards</div>
@@ -76,6 +93,17 @@ export default function PublicStatusPage() {
                         </div>
                         <span className={`badge ${statusColor(b.status)}`}>{b.status}</span>
                       </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {data.Documents && data.Documents.length > 0 && (
+                <div className="border-t border-slate-100 pt-4 mt-2">
+                  <div className="text-xs font-semibold text-slate-500 uppercase mb-2">Documents</div>
+                  <div className="space-y-1.5">
+                    {data.Documents.map((d, i) => (
+                      <div key={i} className="text-sm px-2 py-1.5 rounded bg-slate-50">{d.documentType || '—'}</div>
                     ))}
                   </div>
                 </div>
