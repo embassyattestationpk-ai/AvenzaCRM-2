@@ -334,7 +334,7 @@ export default function CasesPage() {
   async function fetchAllForExport() {
     const r = await api.getCases({ ...filters, sortBy, sortDir });
     return r.rows.map((c) => ({
-      'S.No': c.Case_ID, Date: fmtDate(c.Date), 'Client Name': c.Client_Name, Company: c.Company,
+      'S.No': c.Case_ID, Date: fmtDate(c.Date), 'Client Name': c.End_Client_Name || c.Client_Name, 'Referred By': c.End_Client_Name ? c.Client_Name : '', Company: c.Company,
       Service: c.Service, Vendor: c.Vendor, 'No. of Documents': c.No_of_Documents,
       'Vendor Payment': c.Vendor_Payment, 'Client Payment': c.Client_Payment, Profit: c.Profit,
       'Document Status': c.Document_Status, 'Return Date': fmtDate(c.Actual_Return_Date || c.Expected_Return_Date),
@@ -423,7 +423,18 @@ export default function CasesPage() {
               <tr key={c.Case_ID} className="border-b border-slate-50 hover:bg-slate-50">
                 <td className="td font-mono text-xs">{c.Case_ID}</td>
                 <td className="td">{fmtDate(c.Date)}</td>
-                <td className="td font-medium">{c.Client_Name}</td>
+                <td className="td font-medium">
+                  {/* PHASE 18 fix: a Consultant-mode case's Client_Name/Client_ID
+                      stay the CONSULTANT (needed for rate auto-suggest) — the
+                      column should show the actual end-client instead, with
+                      the referring consultant as a small subtext underneath. */}
+                  {c.End_Client_Name ? (
+                    <>
+                      <div>{c.End_Client_Name}</div>
+                      <div className="text-xs text-slate-400 font-normal">via {c.Client_Name}</div>
+                    </>
+                  ) : c.Client_Name}
+                </td>
                 <td className="td"><span className={`badge ${c.Client_Type === 'Consultant' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-700'}`}>{c.Client_Type || 'Walk-in'}</span></td>
                 <td className="td">{c.Company}</td>
                 <td className="td">{c.Service}{isProcess && <span className="ml-1 text-xs text-amber-600">(multi-step)</span>}</td>
