@@ -363,7 +363,7 @@ export default function SettingsPage() {
         </div>
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
-            {['Service', 'Document Type', 'Vendor', 'Rate', 'TAT', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+            {['Service', 'Document Type', 'Vendor', 'First Doc', 'Additional Doc', 'TAT', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
           </tr></thead>
           <tbody>
             {rates.map((r) => (
@@ -372,6 +372,7 @@ export default function SettingsPage() {
                 <td className="td">{r.Document_Type || <span className="text-slate-400">any</span>}</td>
                 <td className="td">{r.Vendor_Name}</td>
                 <td className="td">{r.Rate}</td>
+                <td className="td">{r.Additional_Rate || '-'}</td>
                 <td className="td">{r.Turnaround_Days || '-'}</td>
                 <td className="td">
                   <div className="flex gap-2">
@@ -381,7 +382,7 @@ export default function SettingsPage() {
                 </td>
               </tr>
             ))}
-            {!rates.length && <tr><td colSpan={6} className="td text-center text-slate-400 py-6">No rates yet</td></tr>}
+            {!rates.length && <tr><td colSpan={7} className="td text-center text-slate-400 py-6">No rates yet</td></tr>}
           </tbody>
         </table>
       </div>
@@ -396,7 +397,7 @@ export default function SettingsPage() {
         </div>
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
-            {['Consultant', 'Board / Service', 'Document Type', 'Rate', 'TAT', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+            {['Consultant', 'Board / Service', 'Document Type', 'First Doc', 'Additional Doc', 'TAT', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
           </tr></thead>
           <tbody>
             {consultantRates.map((r) => (
@@ -405,6 +406,7 @@ export default function SettingsPage() {
                 <td className="td">{r.Board_Name}</td>
                 <td className="td">{r.Document_Type || <span className="text-slate-400">any</span>}</td>
                 <td className="td">{r.Rate}</td>
+                <td className="td">{r.Additional_Rate || '-'}</td>
                 <td className="td">{r.Turnaround_Days || '-'}</td>
                 <td className="td">
                   <div className="flex gap-2">
@@ -414,7 +416,7 @@ export default function SettingsPage() {
                 </td>
               </tr>
             ))}
-            {!consultantRates.length && <tr><td colSpan={6} className="td text-center text-slate-400 py-6">No consultant rates yet</td></tr>}
+            {!consultantRates.length && <tr><td colSpan={7} className="td text-center text-slate-400 py-6">No consultant rates yet</td></tr>}
           </tbody>
         </table>
       </div>
@@ -429,7 +431,7 @@ export default function SettingsPage() {
         </div>
         <table className="w-full">
           <thead><tr className="border-b border-slate-100">
-            {['Service', 'Document Type', 'Client Rate', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+            {['Service', 'Document Type', 'First Doc', 'Additional Doc', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
           </tr></thead>
           <tbody>
             {clientRates.map((r) => (
@@ -437,6 +439,7 @@ export default function SettingsPage() {
                 <td className="td font-medium">{r.Service}</td>
                 <td className="td">{r.Document_Type}</td>
                 <td className="td">{r.Client_Rate}</td>
+                <td className="td">{r.Additional_Rate || '-'}</td>
                 <td className="td">
                   <div className="flex gap-2">
                     <button className="btn-ghost" onClick={() => setEditingClientRate(r)}>Edit</button>
@@ -445,7 +448,7 @@ export default function SettingsPage() {
                 </td>
               </tr>
             ))}
-            {!clientRates.length && <tr><td colSpan={4} className="td text-center text-slate-400 py-6">No client rates yet</td></tr>}
+            {!clientRates.length && <tr><td colSpan={5} className="td text-center text-slate-400 py-6">No client rates yet</td></tr>}
           </tbody>
         </table>
       </div>
@@ -617,7 +620,7 @@ function ServiceForm({ initial, onSaved, onCancel }) {
 
 function ConsultantRateForm({ initial, boardTypes, services, docTypes, onSaved, onCancel }) {
   const [consultants, setConsultants] = useState([]);
-  const [form, setForm] = useState({ Consultant_Name: '', Board_Name: '', Document_Type: '', Rate: '', Turnaround_Days: '', ...initial });
+  const [form, setForm] = useState({ Consultant_Name: '', Board_Name: '', Document_Type: '', Rate: '', Additional_Rate: '', Turnaround_Days: '', ...initial });
   const [saving, setSaving] = useState(false);
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
   const options = [...(boardTypes || []), ...services.map((s) => s.Service_Name)];
@@ -664,10 +667,14 @@ function ConsultantRateForm({ initial, boardTypes, services, docTypes, onSaved, 
         </select>
         <p className="text-xs text-slate-400 mt-1">A rate is keyed by Board/Service + Document Type, so "IBCC Matric" and "IBCC Inter" can have different rates.</p>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <div>
-          <label className="label">Rate</label>
+          <label className="label">First Document</label>
           <input type="number" className="input" value={form.Rate} onChange={(e) => set('Rate', e.target.value)} required />
+        </div>
+        <div>
+          <label className="label">Additional Document</label>
+          <input type="number" className="input" value={form.Additional_Rate} onChange={(e) => set('Additional_Rate', e.target.value)} placeholder="Optional" />
         </div>
         <div>
           <label className="label">Turnaround Time (TAT)</label>
@@ -683,7 +690,7 @@ function ConsultantRateForm({ initial, boardTypes, services, docTypes, onSaved, 
 }
 
 function ClientRateForm({ initial, boardTypes, services, docTypes, onSaved, onCancel }) {
-  const [form, setForm] = useState({ Service: '', Document_Type: '', Client_Rate: '', ...initial });
+  const [form, setForm] = useState({ Service: '', Document_Type: '', Client_Rate: '', Additional_Rate: '', ...initial });
   const [saving, setSaving] = useState(false);
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
   const options = [...(boardTypes || []), ...services.map((s) => s.Service_Name)];
@@ -718,9 +725,15 @@ function ClientRateForm({ initial, boardTypes, services, docTypes, onSaved, onCa
           </select>
         </div>
       </div>
-      <div>
-        <label className="label">Client Rate (standard price)</label>
-        <input type="number" className="input" value={form.Client_Rate} onChange={(e) => set('Client_Rate', e.target.value)} required />
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="label">First Document</label>
+          <input type="number" className="input" value={form.Client_Rate} onChange={(e) => set('Client_Rate', e.target.value)} required />
+        </div>
+        <div>
+          <label className="label">Additional Document</label>
+          <input type="number" className="input" value={form.Additional_Rate} onChange={(e) => set('Additional_Rate', e.target.value)} placeholder="Optional" />
+        </div>
       </div>
       <div className="flex justify-end gap-2 pt-2">
         <button type="button" className="btn-secondary" onClick={onCancel}>Cancel</button>
@@ -772,7 +785,7 @@ function DocumentTypeForm({ initial, onSaved, onCancel }) {
 
 function ServiceRateForm({ initial, services, docTypes, onSaved, onCancel }) {
   const [vendors, setVendors] = useState([]);
-  const [form, setForm] = useState({ Service_Name: '', Vendor_Name: '', Document_Type: '', Rate: '', Turnaround_Days: '', ...initial });
+  const [form, setForm] = useState({ Service_Name: '', Vendor_Name: '', Document_Type: '', Rate: '', Additional_Rate: '', Turnaround_Days: '', ...initial });
   const [saving, setSaving] = useState(false);
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
 
@@ -818,10 +831,14 @@ function ServiceRateForm({ initial, services, docTypes, onSaved, onCancel }) {
         </select>
         <p className="text-xs text-slate-400 mt-1">A rate is keyed by Vendor + Service + Document Type, so "Ejaz: IBCC Matric" and "Ejaz: IBCC Inter" can have different rates.</p>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <div>
-          <label className="label">Rate</label>
+          <label className="label">First Document</label>
           <input type="number" className="input" value={form.Rate} onChange={(e) => set('Rate', e.target.value)} required />
+        </div>
+        <div>
+          <label className="label">Additional Document</label>
+          <input type="number" className="input" value={form.Additional_Rate} onChange={(e) => set('Additional_Rate', e.target.value)} placeholder="Optional" />
         </div>
         <div>
           <label className="label">Turnaround Time (TAT)</label>
