@@ -52,7 +52,13 @@ export default function ClientsPage() {
           <h1 className="text-xl font-bold text-slate-800">Clients</h1>
           <p className="text-sm text-slate-500">{clients.length} total</p>
         </div>
-        <button className="btn-primary" onClick={() => setEditing('new')}>➕ Add Client</button>
+        <div className="flex gap-2">
+          <button className="btn-primary" onClick={() => setEditing('new')}>➕ Add Client</button>
+          {/* PHASE 17: a clear, dedicated entry point for adding a
+              Consultant — opens the same ClientForm modal, just pre-set to
+              Consultant mode instead of defaulting to Walk-in. */}
+          <button className="btn-secondary" onClick={() => setEditing('new-consultant')}>➕ Add Consultant</button>
+        </div>
       </div>
 
       <div className="card">
@@ -73,11 +79,11 @@ export default function ClientsPage() {
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead><tr className="border-b border-slate-100">
-              {['Client Name', 'Type', 'Phone', 'Email', 'Company / ID Card', 'Total Cases', 'Total Paid', 'Pending', 'Last Activity', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
+              {['Client Name', 'Type', 'Phone', 'Email', 'Company / ID Card', 'Referred By', 'Total Cases', 'Total Paid', 'Pending', 'Last Activity', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}
             </tr></thead>
             <tbody>
-              {loading && <tr><td colSpan={10} className="td text-center text-slate-400 py-8">Loading…</td></tr>}
-              {!loading && clients.length === 0 && <tr><td colSpan={10} className="td text-center text-slate-400 py-8">No clients yet</td></tr>}
+              {loading && <tr><td colSpan={11} className="td text-center text-slate-400 py-8">Loading…</td></tr>}
+              {!loading && clients.length === 0 && <tr><td colSpan={11} className="td text-center text-slate-400 py-8">No clients yet</td></tr>}
               {clients.map((c) => (
                 <tr key={c.Client_ID} className="border-b border-slate-50 hover:bg-slate-50">
                   <td className="td"><Link href={`/clients/${c.Client_ID}`} className="font-medium text-brand-700 hover:underline">{c.Client_Name}</Link></td>
@@ -87,6 +93,12 @@ export default function ClientsPage() {
                   <td className="td">{c.Phone}</td>
                   <td className="td">{c.Email}</td>
                   <td className="td">{c.Client_Type === 'Consultant' ? c.Company : c.ID_Card_Number}</td>
+                  {/* PHASE 17: who referred this client in — the Consultant's
+                      name for an end-client that came through a Consultant's
+                      case, or the literal "Walk-in" for anyone else
+                      (including Consultants themselves and genuine direct
+                      walk-ins with no Referred_By set). */}
+                  <td className="td">{c.Referred_By || 'Walk-in'}</td>
                   <td className="td">{c.Total_Cases}</td>
                   <td className="td">{money(c.Total_Paid)}</td>
                   <td className="td text-red-600 font-medium">{money(c.Pending_Amount)}</td>
@@ -105,8 +117,12 @@ export default function ClientsPage() {
       </div>
 
       {editing && (
-        <Modal title={editing === 'new' ? 'Add Client' : 'Edit Client'} onClose={() => setEditing(null)}>
-          <ClientForm initial={editing === 'new' ? undefined : editing} onSaved={() => { setEditing(null); load(); }} onCancel={() => setEditing(null)} />
+        <Modal title={editing === 'new' ? 'Add Client' : editing === 'new-consultant' ? 'Add Consultant' : 'Edit Client'} onClose={() => setEditing(null)}>
+          <ClientForm
+            initial={editing === 'new' ? undefined : editing === 'new-consultant' ? { Client_Type: 'Consultant' } : editing}
+            onSaved={() => { setEditing(null); load(); }}
+            onCancel={() => setEditing(null)}
+          />
         </Modal>
       )}
 
