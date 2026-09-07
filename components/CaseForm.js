@@ -342,6 +342,18 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEdit, isMultiple, isConsultant, form.Vendor, singleDocuments.map((d) => d.documentType).join(',')]);
 
+  // PHASE 16 (Part A) totals — declared here, BEFORE grossTotal/profit below
+  // reference them, since `const` bindings are not usable before their own
+  // declaration runs (a bug: these used to be declared further down the
+  // file, which threw "Cannot access before initialization" and crashed the
+  // whole form — New Case / Quick Add — the moment CaseForm rendered).
+  const servicesGrossTotal = useMemo(() => (
+    serviceRows.reduce((s, r) => s + r.documents.reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0)
+  ), [serviceRows]);
+  const servicesVendorTotal = useMemo(() => (
+    serviceRows.reduce((s, r) => s + r.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0)
+  ), [serviceRows]);
+
   // Total (Gross) amount the client is being billed — shown next to the
   // Advance Payment box so staff can see the total while deciding the
   // advance amount, not just the Profit figure. Phase 15: single mode's
@@ -527,13 +539,6 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
       }
     }
   }
-
-  const servicesGrossTotal = useMemo(() => (
-    serviceRows.reduce((s, r) => s + r.documents.reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0)
-  ), [serviceRows]);
-  const servicesVendorTotal = useMemo(() => (
-    serviceRows.reduce((s, r) => s + r.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0)
-  ), [serviceRows]);
 
   // Resolves one single-mode ticked document's saved Document_Type: "Other"
   // free text (same pattern as resolveDocType) plus, when Service =
