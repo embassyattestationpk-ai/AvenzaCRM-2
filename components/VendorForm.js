@@ -14,8 +14,13 @@ import { api } from '../lib/api';
 // by an exact documentType, so a blank row simply never matches those
 // granular lookups and can't clobber them — see the vendor profile page's
 // existing "any" label for a blank Document_Type, same idea).
+// PHASE 18: "Rate" split into two simple numbers — First Document and
+// Additional Document (a second/third copy in the same batch usually costs
+// less) — plus TAT. Nothing fancier than that: the auto-suggest at intake
+// still only pre-fills the First Document rate, and everything past that
+// (extra copies, client slips) stays a manual staff edit, per instruction.
 function emptyRow(service, isOther) {
-  return { id: (isOther ? 'other_' : 'svc_') + service + '_' + Math.random().toString(36).slice(2, 8), service, isOther: !!isOther, rate: '', tat: '', rateId: null };
+  return { id: (isOther ? 'other_' : 'svc_') + service + '_' + Math.random().toString(36).slice(2, 8), service, isOther: !!isOther, rate: '', additionalRate: '', tat: '', rateId: null };
 }
 
 export default function VendorForm({ initial, onSaved, onCancel }) {
@@ -46,6 +51,7 @@ export default function VendorForm({ initial, onSaved, onCancel }) {
         service: r.Service_Name,
         isOther: !boardTypes.length ? true : !boardTypes.includes(r.Service_Name),
         rate: r.Rate,
+        additionalRate: r.Additional_Rate || '',
         tat: r.Turnaround_Days || '',
         rateId: r.Rate_ID,
       }));
@@ -94,8 +100,8 @@ export default function VendorForm({ initial, onSaved, onCancel }) {
       const vendorName = vendor?.Vendor_Name || form.Vendor_Name;
       await Promise.all(rows.map((r) => (
         r.rateId
-          ? api.updateServiceRate({ Rate_ID: r.rateId, Vendor_Name: vendorName, Service_Name: r.service, Rate: Number(r.rate) || 0, Turnaround_Days: r.tat, Document_Type: '' }).catch(() => {})
-          : api.addServiceRate({ Vendor_Name: vendorName, Service_Name: r.service, Rate: Number(r.rate) || 0, Turnaround_Days: r.tat, Document_Type: '' }).catch(() => {})
+          ? api.updateServiceRate({ Rate_ID: r.rateId, Vendor_Name: vendorName, Service_Name: r.service, Rate: Number(r.rate) || 0, Additional_Rate: Number(r.additionalRate) || 0, Turnaround_Days: r.tat, Document_Type: '' }).catch(() => {})
+          : api.addServiceRate({ Vendor_Name: vendorName, Service_Name: r.service, Rate: Number(r.rate) || 0, Additional_Rate: Number(r.additionalRate) || 0, Turnaround_Days: r.tat, Document_Type: '' }).catch(() => {})
       )));
       // A service that was ticked when the form loaded but got unticked
       // before save no longer applies — remove its now-stale rate row too.
@@ -158,7 +164,7 @@ export default function VendorForm({ initial, onSaved, onCancel }) {
           <div className="rounded-lg border border-slate-100 overflow-hidden">
             <table className="w-full text-sm">
               <thead><tr className="border-b border-slate-100 bg-slate-50">
-                {['#', 'Service', 'Rate', 'TAT', ''].map((h) => <th key={h} className="th">{h}</th>)}
+                {['#', 'Service', 'First Document', 'Additional Document', 'TAT', ''].map((h) => <th key={h} className="th">{h}</th>)}
               </tr></thead>
               <tbody>
                 {rows.map((r, i) => (
@@ -166,6 +172,7 @@ export default function VendorForm({ initial, onSaved, onCancel }) {
                     <td className="td text-slate-400">{i + 1}</td>
                     <td className="td font-medium">{r.service}</td>
                     <td className="td"><input type="number" className="input !py-1" value={r.rate} onChange={(e) => setRowField(r.id, { rate: e.target.value })} /></td>
+                    <td className="td"><input type="number" className="input !py-1" value={r.additionalRate} onChange={(e) => setRowField(r.id, { additionalRate: e.target.value })} /></td>
                     <td className="td"><input className="input !py-1" placeholder="e.g. 3-4 days" value={r.tat} onChange={(e) => setRowField(r.id, { tat: e.target.value })} /></td>
                     <td className="td"><button type="button" className="btn-ghost !py-1" onClick={() => removeRow(r.id)}>Remove</button></td>
                   </tr>
