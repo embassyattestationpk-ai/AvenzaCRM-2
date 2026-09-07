@@ -86,12 +86,18 @@ function getCaseServicesJS(c) {
 // document type from the DocumentTypes list (which already includes an
 // "Other" entry — same free-text pattern Phase 14 built) adds a rate row
 // below the checklist; unticking removes it.
-function DocumentTickList({ docTypes, documents, onToggle, onOtherText, onRateChange, embassyLabel }) {
-  const otherDoc = documents.find((d) => d.documentType === 'Other');
+function DocumentTickList({ docTypes, documents, onToggle, onAddOther, onRemove, onRateChange, embassyLabel }) {
+  // PHASE 18 (follow-up) — "Other" used to be one shared checkbox/textbox
+  // pair, so only ONE custom document could ever be added at a time (ticking
+  // it again did nothing new to tick). It's now its own "+ Add" button that
+  // always appends a brand-new blank custom-document row, each with its own
+  // name text box and its own remove button — any number of distinct custom
+  // documents can be added this way.
+  const namedDocTypes = docTypes.filter((dt) => dt.Name !== 'Other');
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-2 gap-1 rounded bg-white border border-slate-100 p-2 max-h-40 overflow-y-auto">
-        {docTypes.map((dt) => {
+        {namedDocTypes.map((dt) => {
           const checked = documents.some((d) => d.documentType === dt.Name);
           return (
             <label key={dt.Type_ID} className="flex items-center gap-1.5 text-xs">
@@ -101,15 +107,21 @@ function DocumentTickList({ docTypes, documents, onToggle, onOtherText, onRateCh
           );
         })}
       </div>
-      {otherDoc && (
-        <input className="input" placeholder="Type the document name" value={otherDoc.documentTypeOther || ''} onChange={(e) => onOtherText(e.target.value)} />
-      )}
+      <button type="button" className="text-xs text-brand-600 font-medium" onClick={onAddOther}>+ Add another document (Other / not in the list)</button>
       {!documents.length && <p className="text-xs text-slate-400">No documents ticked yet.</p>}
       {documents.map((d, di) => (
         <div key={di} className="rounded bg-slate-50 border border-slate-100 p-2 space-y-2">
-          <div className="text-xs font-medium text-slate-600">
-            {d.documentType === 'Other' ? (d.documentTypeOther || 'Other') : (d.documentType || '—')}{embassyLabel || ''}
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-slate-600">
+              {d.documentType === 'Other' ? 'Other (custom document)' : (d.documentType || '—')}{embassyLabel || ''}
+            </div>
+            {d.documentType === 'Other' && (
+              <button type="button" className="text-xs text-red-500" onClick={() => onRemove(di)}>✕ Remove</button>
+            )}
           </div>
+          {d.documentType === 'Other' && (
+            <input className="input" placeholder="Type the document name" value={d.documentTypeOther || ''} onChange={(e) => onRateChange(di, { documentTypeOther: e.target.value })} />
+          )}
           <div className="grid grid-cols-4 gap-3">
             <div>
               <label className="label">Vendor Rate</label>
@@ -139,12 +151,16 @@ function DocumentTickList({ docTypes, documents, onToggle, onOtherText, onRateCh
 // picker (a document, even within the same service, can go to a different
 // vendor and be tracked independently — the confirmed core requirement of
 // this phase), on top of its own four rate fields.
-function ServiceDocumentTickList({ docTypes, documents, vendors, onToggle, onOtherText, onFieldChange }) {
-  const otherDoc = documents.find((d) => d.documentType === 'Other');
+function ServiceDocumentTickList({ docTypes, documents, vendors, onToggle, onAddOther, onRemove, onFieldChange }) {
+  // PHASE 18 (follow-up) — see DocumentTickList above for why: "Other" is now
+  // a "+ Add" button that appends a fresh custom-document row every click,
+  // each with its own independent name box and remove button, instead of one
+  // shared checkbox+textbox that only ever tracked a single custom document.
+  const namedDocTypes = docTypes.filter((dt) => dt.Name !== 'Other');
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-2 gap-1 rounded bg-white border border-slate-100 p-2 max-h-40 overflow-y-auto">
-        {docTypes.map((dt) => {
+        {namedDocTypes.map((dt) => {
           const checked = documents.some((d) => d.documentType === dt.Name);
           return (
             <label key={dt.Type_ID} className="flex items-center gap-1.5 text-xs">
@@ -154,21 +170,27 @@ function ServiceDocumentTickList({ docTypes, documents, vendors, onToggle, onOth
           );
         })}
       </div>
-      {otherDoc && (
-        <input className="input" placeholder="Type the document name" value={otherDoc.documentTypeOther || ''} onChange={(e) => onOtherText(e.target.value)} />
-      )}
+      <button type="button" className="text-xs text-brand-600 font-medium" onClick={onAddOther}>+ Add another document (Other / not in the list)</button>
       {!documents.length && <p className="text-xs text-slate-400">No documents ticked yet.</p>}
       {documents.map((d, di) => (
         <div key={di} className="rounded bg-slate-50 border border-slate-100 p-2 space-y-2">
           <div className="flex items-center justify-between gap-2">
             <div className="text-xs font-medium text-slate-600">
-              {d.documentType === 'Other' ? (d.documentTypeOther || 'Other') : (d.documentType || '—')}
+              {d.documentType === 'Other' ? 'Other (custom document)' : (d.documentType || '—')}
             </div>
-            <select className="input !py-1 !text-xs max-w-[10rem]" value={d.vendor} onChange={(e) => onFieldChange(di, { vendor: e.target.value })}>
-              <option value="">This document's vendor</option>
-              {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
-            </select>
+            <div className="flex items-center gap-2">
+              {d.documentType === 'Other' && (
+                <button type="button" className="text-xs text-red-500" onClick={() => onRemove(di)}>✕ Remove</button>
+              )}
+              <select className="input !py-1 !text-xs max-w-[10rem]" value={d.vendor} onChange={(e) => onFieldChange(di, { vendor: e.target.value })}>
+                <option value="">This document's vendor</option>
+                {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
+              </select>
+            </div>
           </div>
+          {d.documentType === 'Other' && (
+            <input className="input" placeholder="Type the document name" value={d.documentTypeOther || ''} onChange={(e) => onFieldChange(di, { documentTypeOther: e.target.value })} />
+          )}
           <div className="grid grid-cols-4 gap-3">
             <div>
               <label className="label">Vendor Rate</label>
@@ -430,10 +452,15 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
       return { ...r, documents: r.documents.filter((d) => d.documentType !== name) };
     }));
   }
-  function setBoardOtherDocText(boardIdx, text) {
-    setBoardRows((rows) => rows.map((r, i) => (
-      i === boardIdx ? { ...r, documents: r.documents.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)) } : r
-    )));
+  // PHASE 18 (follow-up): "Other" is no longer one shared toggle — Add always
+  // appends a fresh blank custom-document row (so a second, third, etc.
+  // custom document can be added), and Remove deletes one specific row by
+  // index (each row's own name box is wired directly via onRateChange).
+  function addBoardOtherDocument(boardIdx) {
+    setBoardRows((rows) => rows.map((r, i) => (i === boardIdx ? { ...r, documents: [...r.documents, emptyDocument('Other')] } : r)));
+  }
+  function removeBoardDocument(boardIdx, di) {
+    setBoardRows((rows) => rows.map((r, i) => (i === boardIdx ? { ...r, documents: r.documents.filter((_, j) => j !== di) } : r)));
   }
 
   // --- Single-mode document tick-box list (Phase 15) ---
@@ -445,8 +472,11 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   function setSingleDocument(idx, patch) {
     setSingleDocuments((docs) => docs.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
   }
-  function setSingleOtherDocText(text) {
-    setSingleDocuments((docs) => docs.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)));
+  function addSingleOtherDocument() {
+    setSingleDocuments((docs) => [...docs, emptyDocument('Other')]);
+  }
+  function removeSingleDocument(di) {
+    setSingleDocuments((docs) => docs.filter((_, j) => j !== di));
   }
 
   // --- PHASE 16 (Part A) service tick-box list ---
@@ -515,10 +545,11 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
       }).catch(() => {});
     }
   }
-  function setServiceOtherDocText(si, text) {
-    setServiceRows((rows) => rows.map((r, i) => (
-      i === si ? { ...r, documents: r.documents.map((d) => (d.documentType === 'Other' ? { ...d, documentTypeOther: text } : d)) } : r
-    )));
+  function addServiceOtherDocument(si) {
+    setServiceRows((rows) => rows.map((r, i) => (i === si ? { ...r, documents: [...r.documents, emptyDocument('Other')] } : r)));
+  }
+  function removeServiceDocument(si, di) {
+    setServiceRows((rows) => rows.map((r, i) => (i === si ? { ...r, documents: r.documents.filter((_, j) => j !== di) } : r)));
   }
   // PHASE 16 (Part B): when a specific document's Vendor is picked (or
   // changed), auto-suggest that vendor's rate for this exact Service +
@@ -638,7 +669,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   // inline error (toast) instead of silently saving an incomplete case.
   function validateNewCase() {
     if (!form.Client_Name) return isConsultant ? 'Consultant is required' : 'Client name is required';
-    if (!form.Phone) return 'Client mobile number is required';
+    if (!isConsultant && !form.Phone) return 'Client mobile number is required';
     if (!form.Date) return 'Date received is required';
     if (!form.Expected_Return_Date) return 'Expected return date is required';
     if (!serviceRows.length) return 'Tick at least one service';
@@ -790,8 +821,8 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
           </select>
         </div>
         <div>
-          <label className="label">Client Mobile Number</label>
-          <input className="input" value={form.Phone || ''} onChange={(e) => set('Phone', e.target.value)} placeholder="03xx-xxxxxxx" required={!isEdit} />
+          <label className="label">{isConsultant ? "Consultant's Contact Number (optional)" : 'Client Mobile Number'}</label>
+          <input className="input" value={form.Phone || ''} onChange={(e) => set('Phone', e.target.value)} placeholder="03xx-xxxxxxx" required={!isEdit && !isConsultant} />
         </div>
       </div>
 
@@ -841,7 +872,7 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
           <div className="text-xs font-semibold text-slate-500 uppercase">End Client Details (whose documents these are)</div>
           <div>
             <label className="label">Client Name</label>
-            <input className="input" value={form.End_Client_Name} onChange={(e) => set('End_Client_Name', e.target.value)} required />
+            <input className="input" value={form.End_Client_Name} onChange={(e) => set('End_Client_Name', e.target.value)} placeholder="Full name of the person whose documents these are" required />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -924,7 +955,8 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
               docTypes={docTypes}
               documents={singleDocuments}
               onToggle={toggleSingleDocument}
-              onOtherText={setSingleOtherDocText}
+              onAddOther={addSingleOtherDocument}
+              onRemove={removeSingleDocument}
               onRateChange={setSingleDocument}
               embassyLabel={singleEmbassyLabel}
             />
@@ -1037,7 +1069,8 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
                   documents={row.documents}
                   vendors={vendors}
                   onToggle={(name, checked) => toggleServiceDocument(si, name, checked)}
-                  onOtherText={(text) => setServiceOtherDocText(si, text)}
+                  onAddOther={() => addServiceOtherDocument(si)}
+                  onRemove={(di) => removeServiceDocument(si, di)}
                   onFieldChange={(di, patch) => setServiceDocumentField(si, di, patch)}
                 />
               </div>
@@ -1092,7 +1125,8 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
                   docTypes={docTypes}
                   documents={row.documents}
                   onToggle={(name, checked) => toggleBoardDocument(bi, name, checked)}
-                  onOtherText={(text) => setBoardOtherDocText(bi, text)}
+                  onAddOther={() => addBoardOtherDocument(bi)}
+                  onRemove={(di) => removeBoardDocument(bi, di)}
                   onRateChange={(di, patch) => setDocument(bi, di, patch)}
                 />
               </div>
