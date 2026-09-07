@@ -74,6 +74,7 @@ export default function Topbar({ onQuickAdd }) {
           <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-30">
             {[
               ['client', 'New Client'],
+              ['consultant', 'New Consultant'],
               ['case', 'New Case'],
               ['payment', 'New Payment'],
               ['vendor', 'New Vendor'],

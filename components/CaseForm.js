@@ -226,6 +226,14 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     Embassy_Other: '',
     Advance_Payment: 0,
     Advance_Payment_Method: 'Cash',
+    // PHASE 17: the actual end-client's own details, captured separately
+    // from the CONSULTANT selected above (Client_Name/Client_ID keep
+    // referring to the consultant — the existing consultant-rate
+    // auto-suggest depends on that) — only used/required when
+    // Client_Type === 'Consultant' on a brand-new case.
+    End_Client_Name: '',
+    End_Client_Phone: '',
+    End_Client_ID_Card: '',
     ...initial,
   }));
 
@@ -629,13 +637,21 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   // Date Received, Expected Return Date. Blocks submission with a clear
   // inline error (toast) instead of silently saving an incomplete case.
   function validateNewCase() {
-    if (!form.Client_Name) return 'Client name is required';
+    if (!form.Client_Name) return isConsultant ? 'Consultant is required' : 'Client name is required';
     if (!form.Phone) return 'Client mobile number is required';
     if (!form.Date) return 'Date received is required';
     if (!form.Expected_Return_Date) return 'Expected return date is required';
     if (!serviceRows.length) return 'Tick at least one service';
     if (serviceRows.some((r) => !r.service.trim())) return 'Every service needs a name';
     if (!serviceRows.some((r) => r.documents.length)) return 'Tick at least one document under a service';
+    // PHASE 17: filing a case through a Consultant also requires the actual
+    // end-client's own Name/Mobile/ID Card — the consultant fields above
+    // only identify WHICH consultant, not whose documents these are.
+    if (isConsultant) {
+      if (!form.End_Client_Name) return "End client's name is required";
+      if (!form.End_Client_Phone) return "End client's mobile number is required";
+      if (!form.End_Client_ID_Card) return "End client's ID Card Number (CNIC) is required";
+    }
     return '';
   }
 
@@ -811,7 +827,36 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
           <label className="label">Company</label>
           <input className="input" value={form.Company} onChange={(e) => set('Company', e.target.value)} placeholder="Optional company name" />
         </div>
-      ) : (
+      ) : null}
+
+      {/* PHASE 17: filing a case through a Consultant still needs the actual
+          end-client's own details — the consultant picked above is only WHO
+          is submitting the case, not whose documents they are. Required,
+          same as the Walk-in path's own Name/Phone/ID Card fields, and kept
+          fully separate from form.Client_Name/Client_ID (those must keep
+          referring to the CONSULTANT — the consultant-rate auto-suggest
+          above depends on it). Shown only for a brand-new case. */}
+      {!isEdit && isConsultant && (
+        <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-3">
+          <div className="text-xs font-semibold text-slate-500 uppercase">End Client Details (whose documents these are)</div>
+          <div>
+            <label className="label">Client Name</label>
+            <input className="input" value={form.End_Client_Name} onChange={(e) => set('End_Client_Name', e.target.value)} required />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">Client Mobile Number</label>
+              <input className="input" value={form.End_Client_Phone} onChange={(e) => set('End_Client_Phone', e.target.value)} placeholder="03xx-xxxxxxx" required />
+            </div>
+            <div>
+              <label className="label">ID Card Number (CNIC)</label>
+              <input className="input" value={form.End_Client_ID_Card} onChange={(e) => set('End_Client_ID_Card', e.target.value)} placeholder="XXXXX-XXXXXXX-X" required />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!isConsultant && (
         <div>
           <label className="label">ID Card Number (CNIC)</label>
           <input className="input" value={form.ID_Card_Number || ''} onChange={(e) => set('ID_Card_Number', e.target.value)} placeholder="XXXXX-XXXXXXX-X" />
