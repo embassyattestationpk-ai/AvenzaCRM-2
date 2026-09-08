@@ -8,6 +8,10 @@ import { downloadBase64File } from '../lib/utils';
 
 const STATUS_OPTIONS = ['New', 'Documents Received', 'Processing', 'Sent to Vendor', 'Pending', 'Completed', 'Returned to Client', 'Cancelled'];
 const EMBASSY_OPTIONS = ['Qatar Embassy', 'Saudi Embassy', 'UAE Embassy', 'Kuwait Embassy', 'Bahrain Embassy', 'Oman Embassy', 'Other'];
+// PHASE 19 — a per-document status list, same set the Cases list's "Change
+// Status" panel already uses (BOARD_STATUS_OPTIONS there) — kept as its own
+// copy here since that file doesn't export it.
+const DOC_STATUS_OPTIONS = ['Document Received', 'Sent to Vendor', 'Hold', 'Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
 
 // Backward-compatible reader for a board's documents — mirrors
 // getBoardDocuments() in Code.gs. A board saved before the multi-document
@@ -308,6 +312,14 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
   const [downloadingReceipt, setDownloadingReceipt] = useState(false);
   const isServicesCase = isEdit && initial?.Case_Mode === 'services' && initial?.Services_JSON;
   const existingServices = isServicesCase ? getCaseServicesJS(initial) : [];
+  // PHASE 19 — editing a services-mode case now fully opens the case:
+  // every document's Vendor/Client rate, vendor, and status is editable
+  // right here, documents can be added or removed, and it all saves
+  // together in one shot when "Update Case" is pressed (same as every
+  // other field on this form) — no more "go to the Cases list to edit"
+  // detour. Seeded once from the case's existing services on open; edits
+  // only touch this local copy until submit.
+  const [editServices, setEditServices] = useState(() => JSON.parse(JSON.stringify(existingServices)));
 
   const [newClientOpen, setNewClientOpen] = useState(false);
   const [newVendorOpen, setNewVendorOpen] = useState(false);
@@ -401,14 +413,26 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     singleDocuments.reduce((s, d) => s + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0)
   ), [singleDocuments]);
 
+  // PHASE 19 — while editing an existing services-mode case, the totals
+  // shown below need to track the live `editServices` copy (rates can now
+  // change, documents can be added/removed right here), not the frozen
+  // snapshot the case originally loaded with.
+  const editServicesGrossTotal = useMemo(() => (
+    editServices.reduce((s, sv) => s + (sv.documents || []).reduce((s2, d) => s2 + (Number(d.clientRate) || 0) + (Number(d.clientAdjustment) || 0), 0), 0)
+  ), [editServices]);
+  const editServicesVendorTotal = useMemo(() => (
+    editServices.reduce((s, sv) => s + (sv.documents || []).reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0)
+  ), [editServices]);
+
   const profit = useMemo(() => {
     if (!isEdit) return servicesGrossTotal - servicesVendorTotal;
+    if (isServicesCase) return editServicesGrossTotal - editServicesVendorTotal;
     if (isMultiple) {
       const vp = boardRows.reduce((s, row) => s + row.documents.reduce((s2, d) => s2 + (Number(d.vendorRate) || 0) + (Number(d.vendorAdjustment) || 0), 0), 0);
       return grossTotal - vp;
     }
     return grossTotal - singleVendorTotal;
-  }, [isEdit, isMultiple, boardRows, grossTotal, singleVendorTotal, servicesGrossTotal, servicesVendorTotal]);
+  }, [isEdit, isServicesCase, isMultiple, boardRows, grossTotal, singleVendorTotal, servicesGrossTotal, servicesVendorTotal, editServicesGrossTotal, editServicesVendorTotal]);
 
   function setBoardRow(idx, patch) {
     setBoardRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -579,6 +603,37 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
     }
   }
 
+  // PHASE 19 — helpers for the now-editable "Services on this case" block
+  // (editing an EXISTING services-mode case). All three only touch the
+  // local `editServices` copy; nothing reaches the backend until "Update
+  // Case" is pressed.
+  function editExistingDoc(si, di, patch) {
+    setEditServices((svcs) => svcs.map((sv, i) => (
+      i === si ? { ...sv, documents: sv.documents.map((d, j) => (j === di ? { ...d, ...patch } : d)) } : sv
+    )));
+  }
+  function addExistingDoc(si) {
+    setEditServices((svcs) => svcs.map((sv, i) => (
+      i === si ? { ...sv, documents: [...sv.documents, { docId: 'new_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7), documentType: '', vendor: '', vendorRate: 0, vendorAdjustment: 0, clientRate: 0, clientAdjustment: 0, status: 'Document Received', sentDate: '', receivedDate: '', vendorPaid: 0, notes: '' }] } : sv
+    )));
+  }
+  // Confirms before removing when the document already has vendor payment
+  // recorded, or has moved past its starting status — a plain unused/just-
+  // added document is removed straight away.
+  function removeExistingDoc(si, di) {
+    const doc = editServices[si]?.documents[di];
+    if (!doc) return;
+    const hasHistory = Number(doc.vendorPaid) > 0 || (doc.status && doc.status !== 'Document Received');
+    const label = doc.documentType === 'Other' ? (doc.documentTypeOther || 'Other') : (doc.documentType || 'this document');
+    if (hasHistory) {
+      const ok = window.confirm(`"${label}" already has progress recorded (status: ${doc.status}${Number(doc.vendorPaid) > 0 ? `, vendor paid: ${doc.vendorPaid}` : ''}). Delete it anyway? This can't be undone.`);
+      if (!ok) return;
+    }
+    setEditServices((svcs) => svcs.map((sv, i) => (
+      i === si ? { ...sv, documents: sv.documents.filter((_, j) => j !== di) } : sv
+    )));
+  }
+
   // Resolves one single-mode ticked document's saved Document_Type: "Other"
   // free text (same pattern as resolveDocType) plus, when Service =
   // "Embassy Attestation", the chosen embassy appended per-document — e.g.
@@ -695,6 +750,12 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
       if (!form.Client_Name) return toast.error('Client name is required');
       if (isMultiple && !boardRows.length) return toast.error('Tick at least one board');
       if (isMultiple && boardRows.some((r) => !r.board.trim())) return toast.error('Every board needs a name');
+      // PHASE 19: a freshly "+ Add"-ed document needs its type picked (and,
+      // if Other, its name typed) before it can be saved — same rule new-
+      // case intake already enforces.
+      if (isServicesCase && editServices.some((sv) => (sv.documents || []).some((d) => !resolveDocType(d)))) {
+        return toast.error('Every document needs a type selected (or a name typed for "Other")');
+      }
     }
     setSaving(true);
     try {
@@ -745,15 +806,40 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
 
       if (isEdit) {
         payload.Profit = profit;
-        // A services-mode case's documents/status/vendor are edited from
-        // the Cases list's bulk update panel, not this form (mirrors how a
-        // legacy "multiple" case's boards are edited via Change Status) —
-        // don't touch Services_JSON/Documents_JSON here, only the shared
-        // case-level fields below.
         if (!isMultiple && !isServicesCase) {
           payload.Documents = buildSingleDocumentsPayload();
           payload.Client_Payment = grossTotal;
           payload.Vendor_Payment = singleVendorTotal;
+        }
+        // PHASE 19 — a services-mode case's documents/rates/vendor/status
+        // are now edited right here (editServices, built up from the tick-
+        // list above) and sent along in the same updateCase call, in the
+        // same {Service, Urgency, Documents:[...]} shape addCase already
+        // uses — updateCase already knows how to rebuild Services_JSON and
+        // every rollup from that shape, preserving each document's existing
+        // docId (and so its in-flight status/vendor history) wherever one
+        // is echoed back; only a brand-new "+ Add a document" row (docId
+        // starting "new_") gets a fresh one server-side.
+        if (isServicesCase) {
+          payload.Services = editServices.map((sv) => ({
+            Service_Id: sv.serviceId,
+            Service: sv.service,
+            Urgency: sv.urgency,
+            Documents: (sv.documents || []).map((d) => ({
+              docId: d.docId && !d.docId.startsWith('new_') ? d.docId : undefined,
+              Document_Type: resolveDocType(d),
+              Vendor: d.vendor || '',
+              Vendor_Rate: Number(d.vendorRate) || 0,
+              Vendor_Adjustment: Number(d.vendorAdjustment) || 0,
+              Client_Rate: Number(d.clientRate) || 0,
+              Client_Adjustment: Number(d.clientAdjustment) || 0,
+              status: d.status || 'Document Received',
+              sentDate: d.sentDate || '',
+              receivedDate: d.receivedDate || '',
+              vendorPaid: Number(d.vendorPaid) || 0,
+              notes: d.notes || '',
+            })),
+          }));
         }
         await api.updateCase({ ...payload, Case_ID: initial.Case_ID });
         toast.success('Case updated');
@@ -988,26 +1074,57 @@ export default function CaseForm({ initial, onSaved, onCancel }) {
         </div>
       )}
 
-      {/* PHASE 16 (Part A): editing a services-mode case shows a read-only
-          breakdown — bulk edits (status/vendor/dates/payment, across
-          services) happen from the Cases list's bulk update panel, not
-          here, mirroring how a legacy "multiple" case's boards work. */}
+      {/* PHASE 19 — editing a services-mode case now fully opens up: every
+          document's Vendor, Vendor Rate, Client Rate (both + their
+          adjustments) and Status can be changed right here, a document can
+          be removed (with a confirm if it already has progress/payment on
+          it) or added, and it's all saved together with the rest of the
+          form when "Update Case" is pressed. */}
       {isServicesCase && (
-        <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-2">
-          <div className="text-xs font-semibold text-slate-500 uppercase">Services on this case (use the Cases list to update status/vendor)</div>
-          {existingServices.map((sv) => (
-            <div key={sv.serviceId} className="rounded bg-white border border-slate-100 px-2 py-1.5 text-sm space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="font-medium">{sv.service}{sv.urgency ? ` (${sv.urgency})` : ''}</span>
-              </div>
-              {(sv.documents || []).map((d) => (
-                <div key={d.docId} className="text-xs text-slate-500 pl-2 flex items-center justify-between">
-                  <span>{d.documentType || '—'} — {d.vendor || 'no vendor'} — <span className="font-medium">{d.status}</span></span>
-                  <span>Vendor {Number(d.vendorRate) + Number(d.vendorAdjustment)} / Client {Number(d.clientRate) + Number(d.clientAdjustment)}</span>
+        <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-3">
+          <div className="text-xs font-semibold text-slate-500 uppercase">Services on this case (edit rates, vendor, status — add or remove documents)</div>
+          {editServices.map((sv, si) => (
+            <div key={sv.serviceId} className="rounded bg-white border border-slate-100 p-2 space-y-2">
+              <div className="font-medium text-sm">{sv.service}{sv.urgency ? ` (${sv.urgency})` : ''}</div>
+              {(sv.documents || []).map((d, di) => (
+                <div key={d.docId} className="rounded bg-slate-50 border border-slate-100 p-2 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    {d.docId.startsWith('new_') ? (
+                      <select className="input !py-1 !text-xs max-w-[14rem]" value={d.documentType === 'Other' ? 'Other' : d.documentType} onChange={(e) => editExistingDoc(si, di, { documentType: e.target.value, documentTypeOther: '' })}>
+                        <option value="">Select document type</option>
+                        {allowedDocTypesForService(sv.service).map((dt) => <option key={dt.Type_ID} value={dt.Name}>{dt.Category} — {dt.Name}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-xs font-medium text-slate-600">{d.documentType || '—'}</span>
+                    )}
+                    <button type="button" className="text-xs text-red-500" onClick={() => removeExistingDoc(si, di)}>✕ Remove</button>
+                  </div>
+                  {d.docId.startsWith('new_') && d.documentType === 'Other' && (
+                    <input className="input" placeholder="Type the document name" value={d.documentTypeOther || ''} onChange={(e) => editExistingDoc(si, di, { documentTypeOther: e.target.value })} />
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <select className="input !py-1 !text-xs" value={d.vendor} onChange={(e) => editExistingDoc(si, di, { vendor: e.target.value })}>
+                      <option value="">No vendor yet</option>
+                      {vendors.map((v) => <option key={v.Vendor_ID} value={v.Vendor_Name}>{v.Vendor_Name}</option>)}
+                    </select>
+                    <select className="input !py-1 !text-xs" value={d.status} onChange={(e) => editExistingDoc(si, di, { status: e.target.value })}>
+                      {DOC_STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    <div><label className="label">Vendor Rate</label><input type="number" className="input" value={d.vendorRate} onChange={(e) => editExistingDoc(si, di, { vendorRate: e.target.value })} /></div>
+                    <div><label className="label">Vendor Adj (+/-)</label><input type="number" className="input" value={d.vendorAdjustment} onChange={(e) => editExistingDoc(si, di, { vendorAdjustment: e.target.value })} /></div>
+                    <div><label className="label">Client Rate</label><input type="number" className="input" value={d.clientRate} onChange={(e) => editExistingDoc(si, di, { clientRate: e.target.value })} /></div>
+                    <div><label className="label">Client Adj (+/-)</label><input type="number" className="input" value={d.clientAdjustment} onChange={(e) => editExistingDoc(si, di, { clientAdjustment: e.target.value })} /></div>
+                  </div>
                 </div>
               ))}
+              {!sv.documents.length && <p className="text-xs text-slate-400">No documents on this service.</p>}
+              <button type="button" className="text-xs text-brand-600 font-medium" onClick={() => addExistingDoc(si)}>+ Add a document to {sv.service}</button>
             </div>
           ))}
+          {!editServices.length && <p className="text-xs text-slate-400">No services on this case.</p>}
+          <p className="text-xs text-slate-400">Changes here save when you press "Update Case" below, together with the rest of the form.</p>
         </div>
       )}
 
