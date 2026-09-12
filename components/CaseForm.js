@@ -11,7 +11,11 @@ const EMBASSY_OPTIONS = ['Qatar Embassy', 'Saudi Embassy', 'UAE Embassy', 'Kuwai
 // PHASE 19 — a per-document status list, same set the Cases list's "Change
 // Status" panel already uses (BOARD_STATUS_OPTIONS there) — kept as its own
 // copy here since that file doesn't export it.
-const DOC_STATUS_OPTIONS = ['Document Received', 'Sent to Vendor', 'Hold', 'Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
+// PHASE 21: added "Received from Vendor - Completed" / "- Returned/Incomplete"
+// — see cases/page.js for why (there was no in-between step for "the vendor
+// gave it back to us" before deciding the final outcome). Kept in sync with
+// BOARD_STATUS_OPTIONS there.
+const DOC_STATUS_OPTIONS = ['Document Received', 'Sent to Vendor', 'Received from Vendor - Completed', 'Received from Vendor - Returned/Incomplete', 'Hold', 'Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
 
 // Backward-compatible reader for a board's documents — mirrors
 // getBoardDocuments() in Code.gs. A board saved before the multi-document
