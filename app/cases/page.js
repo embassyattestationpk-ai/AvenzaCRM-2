@@ -188,14 +188,29 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
 
   // Point (Phase 16 balance popup): don't silently mark documents delivered
   // while the client still owes money — same settle-balance UX carried
-  // forward from the legacy Change Status flow. PHASE 21: also shows this
-  // reminder for "Received from Vendor - Completed" — the vendor is done,
-  // so this is exactly when the client's payment should get chased, even
-  // though the document hasn't left the office yet (not a terminal status).
+  // forward from the legacy Change Status flow. This is about the CLIENT's
+  // payment, so it only belongs at the actual terminal (Delivered/Return)
+  // statuses — not "Received from Vendor - Completed" (see vendorDueForSelected
+  // below for that one instead, which is about the VENDOR's payment).
   function willMarkFinal() {
-    if (!applyStatus) return false;
-    if (status === 'Received from Vendor - Completed') return true;
-    return DOC_TERMINAL_STATUSES.includes(resolvedStatus());
+    return applyStatus && DOC_TERMINAL_STATUSES.includes(resolvedStatus());
+  }
+
+  // PHASE 21 (fix): "Received from Vendor - Completed" means the VENDOR
+  // finished the work — what needs chasing at that point is whether the
+  // VENDOR has been paid, not the client (the client is only asked about
+  // once the document is actually Delivered/Returned to them, via
+  // willMarkFinal above). Sums (vendorRate + vendorAdjustment - vendorPaid)
+  // across every currently-selected document, clamped at 0 per document.
+  function vendorDueForSelected() {
+    return selectedKeys.reduce((sum, key) => {
+      const [serviceId, docId] = key.split('::');
+      const svc = services.find((s) => s.serviceId === serviceId);
+      const doc = svc?.documents.find((d) => d.docId === docId);
+      if (!doc) return sum;
+      const owed = (Number(doc.vendorRate) || 0) + (Number(doc.vendorAdjustment) || 0) - (Number(doc.vendorPaid) || 0);
+      return sum + Math.max(0, owed);
+    }, 0);
   }
 
   function proceed() {
@@ -244,11 +259,7 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
   const settlePanel = settleMode === 'ask' && balance && (
     <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-3">
       <div className="text-sm font-semibold text-amber-800">Client balance is still PKR {balance.balance.toLocaleString()} outstanding</div>
-      <p className="text-xs text-amber-700">
-        {status === 'Received from Vendor - Completed'
-          ? 'The vendor is done — this is a good time to collect payment. Record it now, book it as a loss, or skip for later.'
-          : 'Before marking as delivered: record the payment now, or book this as a loss.'}
-      </p>
+      <p className="text-xs text-amber-700">Before marking as delivered: record the payment now, or book this as a loss.</p>
       <div className="grid grid-cols-2 gap-3">
         <div><label className="label">Amount</label><input type="number" className="input" value={settleAmount} onChange={(e) => setSettleAmount(e.target.value)} /></div>
         <div><label className="label">Payment Method</label><select className="input" value={settleMethod} onChange={(e) => setSettleMethod(e.target.value)}>{paymentMethods.map((m) => <option key={m}>{m}</option>)}</select></div>
@@ -322,6 +333,16 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
             <div className="rounded border border-slate-100 p-2 space-y-1">
               <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyVendorPay} onChange={(e) => setApplyVendorPay(e.target.checked)} /> Record Vendor Payment</label>
               <input type="number" className="input" disabled={!applyVendorPay} placeholder="Amount paid to vendor now" value={vendorPayAmount} onChange={(e) => setVendorPayAmount(e.target.value)} />
+              {/* PHASE 21 (fix): "Received from Vendor - Completed" is about
+                  the VENDOR's payment, not the client's — this reminder
+                  only concerns whether the vendor still needs to be paid
+                  for the selected document(s). */}
+              {applyStatus && status === 'Received from Vendor - Completed' && vendorDueForSelected() > 0 && (
+                <div className="rounded bg-amber-50 border border-amber-200 p-2 space-y-1">
+                  <p className="text-xs text-amber-800">Vendor ki payment abhi PKR {vendorDueForSelected().toLocaleString()} baaki hai.</p>
+                  <button type="button" className="text-xs text-amber-800 underline" onClick={() => { setApplyVendorPay(true); setVendorPayAmount(vendorDueForSelected()); }}>Amount bhar do, main record karna chahta hoon</button>
+                </div>
+              )}
             </div>
             <div className="rounded border border-slate-100 p-2 space-y-1">
               <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyNotes} onChange={(e) => setApplyNotes(e.target.checked)} /> Set Notes</label>
