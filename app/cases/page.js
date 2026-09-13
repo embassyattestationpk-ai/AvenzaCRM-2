@@ -10,7 +10,15 @@ import CaseForm from '../../components/CaseForm';
 import { getCurrentUser, isAdmin } from '../../lib/auth';
 
 const STATUS_OPTIONS = ['New', 'Documents Received', 'Processing', 'Sent to Vendor', 'Pending', 'Completed', 'Returned to Client', 'Cancelled'];
-const BOARD_STATUS_OPTIONS = ['Document Received', 'Sent to Vendor', 'Hold', 'Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
+// PHASE 21: the status list jumped straight from "Sent to Vendor" to a
+// final Delivered/Return status, with no step in between for "the vendor
+// gave it back to us" — there was no way to record that a document had come
+// back from the vendor at all before deciding its final outcome. Two new
+// in-between statuses close that gap: "Received from Vendor - Completed"
+// (the vendor did the work; it's now sitting here waiting to go to the
+// client) and "Received from Vendor - Returned/Incomplete" (the vendor sent
+// it back without finishing it). Neither is a terminal status.
+const BOARD_STATUS_OPTIONS = ['Document Received', 'Sent to Vendor', 'Received from Vendor - Completed', 'Received from Vendor - Returned/Incomplete', 'Hold', 'Return with Payment', 'Return without Payment', 'Delivered with Payment', 'Delivered without Payment'];
 const PAGE_SIZE = 15;
 
 // Backward-compatible reader for a board's documents — mirrors
@@ -118,6 +126,10 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
   const [settleMode, setSettleMode] = useState(null); // null | 'ask' | 'done'
   const [settleAmount, setSettleAmount] = useState(0);
   const [settleMethod, setSettleMethod] = useState('Cash');
+  // PHASE 21 — "Received from Vendor - Returned/Incomplete" isn't a status
+  // that can be saved as-is: it's a prompt for what actually happened next,
+  // resolved into a real status once answered.
+  const [returnChoice, setReturnChoice] = useState(null); // null | 'client' | 'hold'
 
   useEffect(() => {
     Promise.all([
@@ -139,13 +151,27 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
   }
   const selectedKeys = Object.keys(selected).filter((k) => selected[k]);
 
+  // PHASE 21 — "Received from Vendor - Returned/Incomplete" is a
+  // question, not a savable status: it resolves to "Return without
+  // Payment" (given straight back to the client) or "Hold" (kept in the
+  // office) once the follow-up choice below is answered. Every other
+  // status (including the new "Received from Vendor - Completed") saves
+  // exactly as picked.
+  function resolvedStatus() {
+    if (status !== 'Received from Vendor - Returned/Incomplete') return status;
+    if (returnChoice === 'client') return 'Return without Payment';
+    if (returnChoice === 'hold') return 'Hold';
+    return null;
+  }
+
   function buildUpdates() {
+    const finalStatus = resolvedStatus();
     return selectedKeys.map((key) => {
       const [serviceId, docId] = key.split('::');
       const svc = services.find((s) => s.serviceId === serviceId);
       const doc = svc?.documents.find((d) => d.docId === docId);
       const u = { serviceId, docId };
-      if (applyStatus) u.status = status;
+      if (applyStatus) u.status = finalStatus;
       if (applyVendor) {
         u.vendor = vendor;
         if (vendorRate !== '') u.vendorRate = Number(vendorRate);
@@ -162,13 +188,22 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
 
   // Point (Phase 16 balance popup): don't silently mark documents delivered
   // while the client still owes money — same settle-balance UX carried
-  // forward from the legacy Change Status flow.
+  // forward from the legacy Change Status flow. PHASE 21: also shows this
+  // reminder for "Received from Vendor - Completed" — the vendor is done,
+  // so this is exactly when the client's payment should get chased, even
+  // though the document hasn't left the office yet (not a terminal status).
   function willMarkFinal() {
-    return applyStatus && DOC_TERMINAL_STATUSES.includes(status);
+    if (!applyStatus) return false;
+    if (status === 'Received from Vendor - Completed') return true;
+    return DOC_TERMINAL_STATUSES.includes(resolvedStatus());
   }
 
   function proceed() {
     if (!selectedKeys.length) { toast.error('Select at least one document'); return; }
+    if (applyStatus && status === 'Received from Vendor - Returned/Incomplete' && !returnChoice) {
+      toast.error('Pehle batayein: document client ko de diya, ya office me Hold hai?');
+      return;
+    }
     if (willMarkFinal() && balance && balance.balance > 0 && settleMode !== 'done') {
       setSettleAmount(balance.balance);
       setSettleMode('ask');
@@ -209,7 +244,11 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
   const settlePanel = settleMode === 'ask' && balance && (
     <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-3">
       <div className="text-sm font-semibold text-amber-800">Client balance is still PKR {balance.balance.toLocaleString()} outstanding</div>
-      <p className="text-xs text-amber-700">Before marking as delivered: record the payment now, or book this as a loss.</p>
+      <p className="text-xs text-amber-700">
+        {status === 'Received from Vendor - Completed'
+          ? 'The vendor is done — this is a good time to collect payment. Record it now, book it as a loss, or skip for later.'
+          : 'Before marking as delivered: record the payment now, or book this as a loss.'}
+      </p>
       <div className="grid grid-cols-2 gap-3">
         <div><label className="label">Amount</label><input type="number" className="input" value={settleAmount} onChange={(e) => setSettleAmount(e.target.value)} /></div>
         <div><label className="label">Payment Method</label><select className="input" value={settleMethod} onChange={(e) => setSettleMethod(e.target.value)}>{paymentMethods.map((m) => <option key={m}>{m}</option>)}</select></div>
@@ -250,7 +289,19 @@ function BulkDocumentModal({ caseObj, onClose, onDone }) {
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded border border-slate-100 p-2 space-y-1">
               <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyStatus} onChange={(e) => setApplyStatus(e.target.checked)} /> Set Status</label>
-              <select className="input" disabled={!applyStatus} value={status} onChange={(e) => setStatus(e.target.value)}>{BOARD_STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}</select>
+              <select className="input" disabled={!applyStatus} value={status} onChange={(e) => { setStatus(e.target.value); setReturnChoice(null); }}>{BOARD_STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}</select>
+              {/* PHASE 21 — "Returned/Incomplete" isn't savable on its own;
+                  it needs this follow-up answered first (translated in
+                  resolvedStatus() into the real status that gets saved). */}
+              {applyStatus && status === 'Received from Vendor - Returned/Incomplete' && (
+                <div className="rounded bg-amber-50 border border-amber-200 p-2 space-y-1">
+                  <p className="text-xs text-amber-800">Vendor ne document complete nahi kiya — ab kya hua?</p>
+                  <div className="flex gap-2">
+                    <button type="button" className={`text-xs px-2 py-1 rounded border ${returnChoice === 'client' ? 'bg-amber-600 text-white border-amber-600' : 'border-amber-300 text-amber-800'}`} onClick={() => setReturnChoice('client')}>Client ko de diya</button>
+                    <button type="button" className={`text-xs px-2 py-1 rounded border ${returnChoice === 'hold' ? 'bg-amber-600 text-white border-amber-600' : 'border-amber-300 text-amber-800'}`} onClick={() => setReturnChoice('hold')}>Office me Hold hai</button>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="rounded border border-slate-100 p-2 space-y-1">
               <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={applyVendor} onChange={(e) => setApplyVendor(e.target.checked)} /> Set / Change Vendor</label>
